@@ -11,14 +11,14 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
 from constants import *
 
 # Camera
-CAMERA_RES = '1080p'   # Changed from '240p' → better clarity
-LAYOUT_RES = '900p'
+CAMERA_RES = '360p'   # Changed from '1080p' to avoid packet size issues
+LAYOUT_RES = '360p'   # Matching layout resolution
 frame_size = {
     '240p': (352, 240),
     '360p': (480, 360),
     '480p': (640, 480),
     '560p': (800, 560),
-    '720p': (1280, 720),   # corrected 720p resolution
+    '720p': (1280, 720),
     '900p': (1400, 900),
     '1080p': (1920, 1080)
 }
@@ -26,9 +26,14 @@ frame_size = {
 FRAME_WIDTH = frame_size[CAMERA_RES][0]
 FRAME_HEIGHT = frame_size[CAMERA_RES][1]
 
-# Image Encoding
-ENABLE_ENCODE = False
-ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 95]  # sharper frames
+# Image Encoding - FIXED: Enable compression to reduce packet size
+ENABLE_ENCODE = True
+ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 60]  # Lower quality = smaller size
+
+# Audio - FIXED: Reduce audio block size
+ENABLE_AUDIO = True
+SAMPLE_RATE = 44100  # Reduced from 48000
+BLOCK_SIZE = 1024    # Reduced from 2048
 
 
 # Replace the image loading section in qt_gui.py with this:
@@ -179,6 +184,7 @@ class Camera:
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
+        self.max_frame_size = 25000  # Maximum bytes for encoded frame
         
         # Try to initialize camera
         try:
@@ -187,6 +193,10 @@ class Camera:
                 self.cap = cv2.VideoCapture(0)
             
             if self.cap.isOpened():
+                # Set camera properties for smaller output
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+                self.cap.set(cv2.CAP_PROP_FPS, 30)
                 self.camera_available = True
                 print("[INFO] Camera initialized successfully")
             else:
@@ -207,21 +217,37 @@ class Camera:
             
         try:
             ret, frame = self.cap.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame = cv2.resize(frame, frame_size[CAMERA_RES], interpolation=cv2.INTER_AREA)
-                
-                # Apply gesture detection overlay if gesture controller is active
-                if (self.gesture_controller is not None and 
-                    hasattr(self.gesture_controller, 'draw_detection_boxes') and
-                    self.gesture_controller.running):
-                    frame = self.gesture_controller.draw_detection_boxes(frame)
-                
-                if ENABLE_ENCODE:
-                    _, frame = cv2.imencode('.jpg', frame, ENCODE_PARAM)
-                return frame
-            else:
+            if not ret:
                 return None
+                
+            # Resize frame to target resolution
+            frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Apply gesture detection overlay if active
+            if (self.gesture_controller is not None and 
+                hasattr(self.gesture_controller, 'draw_detection_boxes') and
+                self.gesture_controller.running):
+                frame = self.gesture_controller.draw_detection_boxes(frame)
+            
+            if ENABLE_ENCODE:
+                # Encode with adaptive quality to meet size limits
+                quality = 60
+                for attempt in range(3):  # Try different qualities
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+                    success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
+                    
+                    if success and len(encoded_frame) <= self.max_frame_size:
+                        return encoded_frame
+                    quality -= 20  # Reduce quality and try again
+                    
+                # If still too large, use very low quality
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 20]
+                success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
+                return encoded_frame if success else None
+            else:
+                return frame
+                
         except Exception as e:
             print(f"[ERROR] Camera frame capture failed: {e}")
             return None

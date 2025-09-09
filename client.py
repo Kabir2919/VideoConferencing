@@ -637,8 +637,8 @@ from qt_gui import MainWindow, Camera, Microphone, Worker
 
 from constants import *
 
-IP = socket.gethostbyname(socket.gethostname())
-# IP = "192.168.12.1"  # Uncomment and set manually if needed
+# IP = socket.gethostbyname(socket.gethostname())
+IP = "172.20.10.4"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
@@ -825,14 +825,19 @@ class ServerConnection(QThread):
         if not self.connected and msg.request != ADD:
             return
             
-        msg_bytes = pickle.dumps(msg)
         try:
-            if msg.data_type == VIDEO:
-                conn.sendto(msg_bytes, VIDEO_ADDR)
-            elif msg.data_type == AUDIO:
-                conn.sendto(msg_bytes, AUDIO_ADDR)
+            msg_bytes = pickle.dumps(msg)
+            
+            # FIXED: Check packet size before sending
+            if msg.data_type in [VIDEO, AUDIO]:
+                max_size = MEDIA_SIZE[msg.data_type]
+                if len(msg_bytes) > max_size:
+                    # print(f"[ERROR] {msg.data_type} packet too large: {len(msg_bytes)} > {max_size}")
+                    return
+                conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
             else:
                 conn.send_bytes(msg_bytes)
+                
         except (BrokenPipeError, ConnectionResetError, OSError, socket.error) as e:
             print(f"[ERROR] Send failed: {e}")
             if self.connected:  # Only set to False if we were previously connected
@@ -863,19 +868,45 @@ class ServerConnection(QThread):
             try:
                 if media == VIDEO:
                     data = client.get_video()
+                    # FIXED: Skip if no data or if data is too large
+                    if data is None:
+                        time.sleep(0.033)  # ~30 FPS
+                        continue
+                        
+                    # Check data size before sending
+                    msg = Message(self.name, POST, media, data)
+                    msg_bytes = pickle.dumps(msg)
+                    if len(msg_bytes) > MEDIA_SIZE[media]:
+                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]}")
+                        time.sleep(0.033)
+                        continue
+                        
                 elif media == AUDIO:
                     data = client.get_audio()
+                    if data is None:
+                        time.sleep(0.023)  # ~43 FPS for audio
+                        continue
+                        
+                    # Check data size before sending
+                    msg = Message(self.name, POST, media, data)
+                    msg_bytes = pickle.dumps(msg)
+                    if len(msg_bytes) > MEDIA_SIZE[media]:
+                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]}")
+                        time.sleep(0.023)
+                        continue
                 else:
                     print(f"[ERROR] Invalid media type: {media}")
                     break
                     
-                msg = Message(self.name, POST, media, data)
                 self.send_msg(conn, msg)
                 consecutive_errors = 0  # Reset error counter on success
                 
-                # Add small delay to prevent overwhelming the network
-                time.sleep(0.03)  # ~30 FPS for video, frequent for audio
-                
+                # Add appropriate delays
+                if media == VIDEO:
+                    time.sleep(0.033)  # ~30 FPS
+                else:  # AUDIO
+                    time.sleep(0.023)  # ~43 FPS
+                    
             except Exception as e:
                 consecutive_errors += 1
                 print(f"[ERROR] Media broadcast error ({media}): {e}")
