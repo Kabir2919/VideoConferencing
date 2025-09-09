@@ -84,21 +84,35 @@ class ServerConnection(QThread):
         self.disconnect_server()
 
     def init_conn(self):
-        self.main_socket.connect((IP, MAIN_PORT))
+        try:
+            print(f"[DEBUG] Attempting to connect to {IP}:{MAIN_PORT}")
+            self.main_socket.connect((IP, MAIN_PORT))
+            print(f"[DEBUG] Connected to main server successfully")
 
-        client.name = self.name
-        self.main_socket.send_bytes(self.name.encode())
-        conn_status = self.main_socket.recv_bytes().decode()
-        if conn_status != OK:
-            QMessageBox.critical(None, "Error", conn_status)
-            self.main_socket.close()
-            window.close()
-            return
-        
-        self.send_msg(self.video_socket, Message(self.name, ADD, VIDEO))
-        self.send_msg(self.audio_socket, Message(self.name, ADD, AUDIO))
+            client.name = self.name
+            self.main_socket.send_bytes(self.name.encode())
+            conn_status = self.main_socket.recv_bytes().decode()
+            print(f"[DEBUG] Server response: {conn_status}")
+            
+            if conn_status != OK:
+                print(f"[ERROR] Server rejected connection: {conn_status}")
+                QMessageBox.critical(None, "Error", conn_status)
+                self.main_socket.close()
+                window.close()
+                return
+            
+            print(f"[DEBUG] Sending video/audio registration messages")
+            self.send_msg(self.video_socket, Message(self.name, ADD, VIDEO))
+            self.send_msg(self.audio_socket, Message(self.name, ADD, AUDIO))
 
-        self.connected = True
+            self.connected = True
+            print(f"[DEBUG] Connection initialization complete")
+            
+        except Exception as e:
+            print(f"[ERROR] Connection failed: {e}")
+            import traceback
+            traceback.print_exc()
+            self.connected = False
     
     def start_conn_threads(self):
         self.main_conn_thread = Worker(self.handle_conn, self.main_socket, TEXT)

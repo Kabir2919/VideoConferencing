@@ -31,16 +31,53 @@ ENABLE_ENCODE = False
 ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 95]  # sharper frames
 
 
-# frame for no camera
-NOCAM_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nocam.jpeg")
+# Replace the image loading section in qt_gui.py with this:
 
-# crop center part of the nocam frame
-nocam_h, nocam_w = NOCAM_FRAME.shape[:2]
-x, y = (nocam_w - FRAME_WIDTH)//2, (nocam_h - FRAME_HEIGHT)//2
-NOCAM_FRAME = NOCAM_FRAME[y:y+FRAME_HEIGHT, x:x+FRAME_WIDTH]
-# frame for no microphone
-NOMIC_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nomic.jpeg")
+import numpy as np
 
+# Create default frames if image files don't exist
+def create_default_frame(width, height, text, color=(64, 64, 64)):
+    """Create a default frame with text if image files are missing"""
+    frame = np.full((height, width, 3), color, dtype=np.uint8)
+    
+    # Add text to frame
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1
+    thickness = 2
+    text_color = (255, 255, 255)
+    
+    # Get text size
+    (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
+    
+    # Center the text
+    x = (width - text_width) // 2
+    y = (height + text_height) // 2
+    
+    cv2.putText(frame, text, (x, y), font, font_scale, text_color, thickness)
+    return frame
+
+# Try to load images, create defaults if they don't exist
+try:
+    NOCAM_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nocam.jpeg")
+    if NOCAM_FRAME is None:
+        raise FileNotFoundError("nocam.jpeg not found")
+    
+    # Crop center part of the nocam frame
+    nocam_h, nocam_w = NOCAM_FRAME.shape[:2]
+    x, y = (nocam_w - FRAME_WIDTH)//2, (nocam_h - FRAME_HEIGHT)//2
+    NOCAM_FRAME = NOCAM_FRAME[y:y+FRAME_HEIGHT, x:x+FRAME_WIDTH]
+    
+except (FileNotFoundError, AttributeError):
+    print("[WARNING] nocam.jpeg not found, using default frame")
+    NOCAM_FRAME = create_default_frame(FRAME_WIDTH, FRAME_HEIGHT, "Camera Off")
+
+try:
+    NOMIC_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nomic.jpeg")
+    if NOMIC_FRAME is None:
+        raise FileNotFoundError("nomic.jpeg not found")
+except (FileNotFoundError, AttributeError):
+    print("[WARNING] nomic.jpeg not found, using default frame")
+    NOMIC_FRAME = create_default_frame(100, 50, "Mic Off", (128, 0, 0))
 # Audio
 ENABLE_AUDIO = True
 SAMPLE_RATE = 48000
@@ -83,17 +120,33 @@ class Worker(QRunnable):
 
 class Microphone:
     def __init__(self):
-        self.stream = pa.open(
-            rate=SAMPLE_RATE,
-            channels=1,
-            format=pyaudio.paInt16,
-            input=True,
-            frames_per_buffer=BLOCK_SIZE
-        )
+        self.stream = None
+        self.microphone_available = False
+        
+        try:
+            self.stream = pa.open(
+                rate=SAMPLE_RATE,
+                channels=1,
+                format=pyaudio.paInt16,
+                input=True,
+                frames_per_buffer=BLOCK_SIZE
+            )
+            self.microphone_available = True
+            print("[INFO] Microphone initialized successfully")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize microphone: {e}")
+            self.microphone_available = False
 
     def get_data(self):
-        return self.stream.read(BLOCK_SIZE)
-
+        if not self.microphone_available or self.stream is None:
+            return None
+            
+        try:
+            return self.stream.read(BLOCK_SIZE, exception_on_overflow=False)
+        except Exception as e:
+            print(f"[ERROR] Microphone data capture failed: {e}")
+            return None
 
 class AudioThread(QThread):
     def __init__(self, client, parent=None):
@@ -123,36 +176,55 @@ class AudioThread(QThread):
 
 class Camera:
     def __init__(self):
-        self.cap = cv2.VideoCapture(2)
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(0)
-        
-        # Reference to gesture controller for overlay drawing
+        self.cap = None
+        self.camera_available = False
         self.gesture_controller = None
         
-        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+        # Try to initialize camera
+        try:
+            self.cap = cv2.VideoCapture(2)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(0)
+            
+            if self.cap.isOpened():
+                self.camera_available = True
+                print("[INFO] Camera initialized successfully")
+            else:
+                print("[WARNING] No camera available")
+                self.camera_available = False
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize camera: {e}")
+            self.camera_available = False
 
     def set_gesture_controller(self, gesture_controller):
         """Set reference to gesture controller for drawing overlays"""
         self.gesture_controller = gesture_controller
     
     def get_frame(self):
-        ret, frame = self.cap.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = cv2.resize(frame, frame_size[CAMERA_RES], interpolation=cv2.INTER_AREA)
+        if not self.camera_available or self.cap is None:
+            return None
             
-            # Apply gesture detection overlay if gesture controller is active
-            if (self.gesture_controller is not None and 
-                hasattr(self.gesture_controller, 'draw_detection_boxes') and
-                self.gesture_controller.running):
-                frame = self.gesture_controller.draw_detection_boxes(frame)
-            
-            if ENABLE_ENCODE:
-                _, frame = cv2.imencode('.jpg', frame, ENCODE_PARAM)
-            return frame
-
+        try:
+            ret, frame = self.cap.read()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = cv2.resize(frame, frame_size[CAMERA_RES], interpolation=cv2.INTER_AREA)
+                
+                # Apply gesture detection overlay if gesture controller is active
+                if (self.gesture_controller is not None and 
+                    hasattr(self.gesture_controller, 'draw_detection_boxes') and
+                    self.gesture_controller.running):
+                    frame = self.gesture_controller.draw_detection_boxes(frame)
+                
+                if ENABLE_ENCODE:
+                    _, frame = cv2.imencode('.jpg', frame, ENCODE_PARAM)
+                return frame
+            else:
+                return None
+        except Exception as e:
+            print(f"[ERROR] Camera frame capture failed: {e}")
+            return None
 
 class VideoControlButton(QPushButton):
     """Circular control button for video interface"""
