@@ -28,15 +28,12 @@ FRAME_HEIGHT = frame_size[CAMERA_RES][1]
 
 # Image Encoding - FIXED: Enable compression to reduce packet size
 ENABLE_ENCODE = True
-ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 60]  # Lower quality = smaller size
+ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 90]  # Lower quality = smaller size
 
 # Audio - FIXED: Reduce audio block size
 ENABLE_AUDIO = True
 SAMPLE_RATE = 44100  # Reduced from 48000
 BLOCK_SIZE = 1024    # Reduced from 2048
-
-
-# Replace the image loading section in qt_gui.py with this:
 
 import numpy as np
 
@@ -1162,19 +1159,6 @@ class MainWindow(QMainWindow):
     def add_msg(self, from_name: str, msg: str):
         self.chat_widget.add_msg(from_name, "You", msg)
     
-    # def toggle_camera(self):
-    #     if self.client.camera_enabled:
-    #         self.camera_menu.actions()[0].setText("Enable")
-    #     else:
-    #         self.camera_menu.actions()[0].setText("Disable")
-    #     self.client.camera_enabled = not self.client.camera_enabled
-
-    # def toggle_microphone(self):
-    #     if self.client.microphone_enabled:
-    #         self.microphone_menu.actions()[0].setText("Enable")
-    #     else:
-    #         self.microphone_menu.actions()[0].setText("Disable")
-    #     self.client.microphone_enabled = not self.client.microphone_enabled
     def update_camera_ui_state(self):
         """Update all camera-related UI elements to match current state"""
         if self.client.camera_enabled:

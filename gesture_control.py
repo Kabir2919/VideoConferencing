@@ -496,8 +496,6 @@ class AdvancedGestureController(GestureController):
             # Could be used for waving or attention features
             self.status_update_signal.emit("Gesture Control: Open palm detected - Wave hello!")
 
-
-# Usage example and integration helper
 def integrate_gesture_control(main_window):
     """
     Helper function to integrate gesture control with the main window
