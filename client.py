@@ -17,6 +17,45 @@ VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
 
+# class Client:
+#     def __init__(self, name: str, current_device = False):
+#         self.name = name
+#         self.current_device = current_device
+
+#         self.video_frame = None
+#         self.audio_data = None
+
+#         if self.current_device:
+#             self.camera = Camera()
+#             self.microphone = Microphone()
+#         else:
+#             self.camera = None
+#             self.microphone = None
+        
+#         self.camera_enabled = True
+#         self.microphone_enabled = True
+
+#     def get_video(self):
+#         if not self.camera_enabled:
+#             self.video_frame = None
+#             return None
+
+#         if self.camera is not None:
+#             self.video_frame = self.camera.get_frame()
+
+#         return self.video_frame
+    
+#     def get_audio(self):
+#         if not self.microphone_enabled:
+#             self.audio_data = None
+#             return None
+
+#         if self.microphone is not None:
+#             self.audio_data = self.microphone.get_data()
+
+#         return self.audio_data
+# Key changes to Client class in client.py
+
 class Client:
     def __init__(self, name: str, current_device = False):
         self.name = name
@@ -36,12 +75,15 @@ class Client:
         self.microphone_enabled = True
 
     def get_video(self):
+        """Get video frame for transmission or display"""
         if not self.camera_enabled:
             self.video_frame = None
             return None
 
         if self.camera is not None:
-            self.video_frame = self.camera.get_frame()
+            # CRITICAL: For transmission to server, get frame WITHOUT overlays
+            # Overlays are only for local display
+            self.video_frame = self.camera.get_frame(apply_overlays=False)
 
         return self.video_frame
     

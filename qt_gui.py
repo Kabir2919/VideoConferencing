@@ -176,21 +176,91 @@ class AudioThread(QThread):
             self.stream.write(data)
 
 
+# class Camera:
+#     def __init__(self):
+#         self.cap = None
+#         self.camera_available = False
+#         self.gesture_controller = None
+#         self.max_frame_size = 25000  # Maximum bytes for encoded frame
+        
+#         # Try to initialize camera
+#         try:
+#             self.cap = cv2.VideoCapture(2)
+#             if not self.cap.isOpened():
+#                 self.cap = cv2.VideoCapture(0)
+            
+#             if self.cap.isOpened():
+#                 # Set camera properties for smaller output
+#                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+#                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+#                 self.cap.set(cv2.CAP_PROP_FPS, 30)
+#                 self.camera_available = True
+#                 print("[INFO] Camera initialized successfully")
+#             else:
+#                 print("[WARNING] No camera available")
+#                 self.camera_available = False
+                
+#         except Exception as e:
+#             print(f"[ERROR] Failed to initialize camera: {e}")
+#             self.camera_available = False
+
+#     def set_gesture_controller(self, gesture_controller):
+#         """Set reference to gesture controller for drawing overlays"""
+#         self.gesture_controller = gesture_controller
+    
+#     def get_frame(self):
+#         if not self.camera_available or self.cap is None:
+#             return None
+            
+#         try:
+#             ret, frame = self.cap.read()
+#             if not ret:
+#                 return None
+                
+#             # Resize frame to target resolution
+#             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+#             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+#             # Apply gesture detection overlay if active
+#             if (self.gesture_controller is not None and 
+#                 hasattr(self.gesture_controller, 'draw_detection_boxes') and
+#                 self.gesture_controller.running):
+#                 frame = self.gesture_controller.draw_detection_boxes(frame)
+            
+#             if ENABLE_ENCODE:
+#                 # Encode with adaptive quality to meet size limits
+#                 quality = 60
+#                 for attempt in range(3):  # Try different qualities
+#                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+#                     success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
+                    
+#                     if success and len(encoded_frame) <= self.max_frame_size:
+#                         return encoded_frame
+#                     quality -= 20  # Reduce quality and try again
+                    
+#                 # If still too large, use very low quality
+#                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 20]
+#                 success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
+#                 return encoded_frame if success else None
+#             else:
+#                 return frame
+                
+#         except Exception as e:
+#             print(f"[ERROR] Camera frame capture failed: {e}")
+#             return None
 class Camera:
     def __init__(self):
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
-        self.max_frame_size = 25000  # Maximum bytes for encoded frame
+        self.max_frame_size = 25000
         
-        # Try to initialize camera
         try:
             self.cap = cv2.VideoCapture(2)
             if not self.cap.isOpened():
                 self.cap = cv2.VideoCapture(0)
             
             if self.cap.isOpened():
-                # Set camera properties for smaller output
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
@@ -208,7 +278,12 @@ class Camera:
         """Set reference to gesture controller for drawing overlays"""
         self.gesture_controller = gesture_controller
     
-    def get_frame(self):
+    def get_frame(self, apply_overlays=False):
+        """
+        Get camera frame
+        apply_overlays: If True, apply gesture detection overlays (for local display only)
+                       If False, return clean frame (for transmission to other clients)
+        """
         if not self.camera_available or self.cap is None:
             return None
             
@@ -221,8 +296,8 @@ class Camera:
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Apply gesture detection overlay if active
-            if (self.gesture_controller is not None and 
+            # IMPORTANT: Only apply overlays if explicitly requested (for local display)
+            if apply_overlays and (self.gesture_controller is not None and 
                 hasattr(self.gesture_controller, 'draw_detection_boxes') and
                 self.gesture_controller.running):
                 frame = self.gesture_controller.draw_detection_boxes(frame)
@@ -230,13 +305,13 @@ class Camera:
             if ENABLE_ENCODE:
                 # Encode with adaptive quality to meet size limits
                 quality = 60
-                for attempt in range(3):  # Try different qualities
+                for attempt in range(3):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
                     success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
                     
                     if success and len(encoded_frame) <= self.max_frame_size:
                         return encoded_frame
-                    quality -= 20  # Reduce quality and try again
+                    quality -= 20
                     
                 # If still too large, use very low quality
                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 20]
@@ -461,6 +536,87 @@ class VideoControlsOverlay(QWidget):
         self.move(x, y)
 
 
+# class VideoWidget(QWidget):
+#     def __init__(self, client, parent=None):
+#         super().__init__(parent)
+#         self.client = client
+#         self.init_ui()
+
+#         self.timer = QTimer()
+#         self.timer.timeout.connect(self.update_video)
+
+#         self.init_video()
+
+#     def init_ui(self):
+#         self.setStyleSheet(f"""
+#             VideoWidget {{
+#                 background-color: {COLORS['surface']};
+#                 border: 2px solid {COLORS['border']};
+#                 border-radius: 12px;
+#                 margin: 4px;
+#             }}
+#             VideoWidget:hover {{
+#                 border-color: {COLORS['primary']};
+#                 box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15);
+#             }}
+#         """)
+
+#         self.video_viewer = QLabel()
+#         self.video_viewer.setStyleSheet(f"""
+#             QLabel {{
+#                 border-radius: 8px;
+#                 background-color: #000000;
+#             }}
+#         """)
+        
+#         if self.client.current_device:
+#             self.name_label = QLabel(f"You - {self.client.name}")
+#         else:
+#             self.name_label = QLabel(self.client.name)
+        
+#         self.name_label.setStyleSheet(f"""
+#             QLabel {{
+#                 color: {COLORS['text']};
+#                 font-weight: 600;
+#                 font-size: 12px;
+#                 padding: 4px 8px;
+#                 background-color: {COLORS['surface']};
+#                 border-radius: 6px;
+#                 margin: 4px;
+#             }}
+#         """)
+        
+#         self.video_viewer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+#         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+#         self.layout = QVBoxLayout()
+#         self.layout.setContentsMargins(8, 8, 8, 8)
+#         self.layout.addWidget(self.video_viewer)
+#         self.layout.addWidget(self.name_label)
+#         self.setLayout(self.layout)
+    
+#     def init_video(self):
+#         self.timer.start(30)
+    
+#     def update_video(self):
+#         frame = self.client.get_video()
+#         if frame is None:
+#             frame = NOCAM_FRAME.copy()
+#         elif ENABLE_ENCODE:
+#             frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+        
+#         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+        
+#         if self.client.audio_data is None:
+#             # replace bottom center part of the frame with nomic frame
+#             nomic_h, nomic_w, _ = NOMIC_FRAME.shape
+#             x, y = FRAME_WIDTH//2 - nomic_w//2, FRAME_HEIGHT - 50
+#             frame[y:y+nomic_h, x:x+nomic_w] = NOMIC_FRAME.copy()
+
+#         h, w, ch = frame.shape
+#         bytes_per_line = ch * w
+#         q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+#         self.video_viewer.setPixmap(QPixmap.fromImage(q_img))
 class VideoWidget(QWidget):
     def __init__(self, client, parent=None):
         super().__init__(parent)
@@ -524,7 +680,14 @@ class VideoWidget(QWidget):
         self.timer.start(30)
     
     def update_video(self):
-        frame = self.client.get_video()
+        # IMPORTANT: Only apply overlays for the current device's own video
+        if self.client.current_device:
+            # For local display, get frame WITH overlays
+            frame = self.client.camera.get_frame(apply_overlays=True) if self.client.camera else None
+        else:
+            # For other clients, just get the received frame (no overlays)
+            frame = self.client.get_video()
+        
         if frame is None:
             frame = NOCAM_FRAME.copy()
         elif ENABLE_ENCODE:
@@ -533,7 +696,6 @@ class VideoWidget(QWidget):
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
         
         if self.client.audio_data is None:
-            # replace bottom center part of the frame with nomic frame
             nomic_h, nomic_w, _ = NOMIC_FRAME.shape
             x, y = FRAME_WIDTH//2 - nomic_w//2, FRAME_HEIGHT - 50
             frame[y:y+nomic_h, x:x+nomic_w] = NOMIC_FRAME.copy()
