@@ -476,7 +476,13 @@ class ServerConnection(QThread):
                     if hasattr(self, "process_msg"):
                         self.process_msg(media, msg)
                     elif hasattr(self, "handle_msg"):
-                        self.handle_msg(media, msg)
+                        try:
+                            # handle_msg expects only the message object (self already bound)
+                            self.handle_msg(msg)
+                        except Exception as e:
+                            print(f"[{self.name}] [{media}] Error in handle_msg: {e}")
+                            import traceback; print(traceback.format_exc())
+
                     else:
                         # Fallback: print received type (safe no-op)
                         print(f"[{_ts()}] [{self.name}] [{media}] Received message of type: {type(msg)}")
