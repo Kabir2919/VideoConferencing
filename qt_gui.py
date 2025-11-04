@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
 from constants import *
 
 # Camera
-CAMERA_RES = '360p'   # Changed from '1080p' to avoid packet size issues
-LAYOUT_RES = '360p'   # Matching layout resolution
+CAMERA_RES = '240p'   # CHANGED: Much smaller to ensure packets fit
+LAYOUT_RES = '240p'   # Matching layout resolution
 frame_size = {
     '240p': (352, 240),
     '360p': (480, 360),
@@ -26,14 +26,14 @@ frame_size = {
 FRAME_WIDTH = frame_size[CAMERA_RES][0]
 FRAME_HEIGHT = frame_size[CAMERA_RES][1]
 
-# Image Encoding - FIXED: Enable compression to reduce packet size
+# Image Encoding - CRITICAL FIX: Much lower quality
 ENABLE_ENCODE = True
-ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 90]  # Lower quality = smaller size
+ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 50]  # CHANGED: Lower quality for smaller packets
 
-# Audio - FIXED: Reduce audio block size
+# Audio - CRITICAL FIX: Much smaller block size
 ENABLE_AUDIO = True
-SAMPLE_RATE = 44100  # Reduced from 48000
-BLOCK_SIZE = 512    # Reduced from 2048
+SAMPLE_RATE = 44100
+BLOCK_SIZE = 256   # Reduced from 2048
 
 import numpy as np
 
@@ -180,23 +180,22 @@ class Camera:
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
-        self.max_frame_size = 28000
+        # CRITICAL: Target size must account for pickle overhead (~500 bytes)
+        self.max_frame_size = 28000  # Leave margin for pickle overhead
         
         try:
-            self.cap = cv2.VideoCapture(2)
-            if not self.cap.isOpened():
-                self.cap = cv2.VideoCapture(0)
+            self.cap = cv2.VideoCapture(0)  # Try default camera first
             
             if self.cap.isOpened():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
                 
-                # NEW: Enhanced color settings
-                self.cap.set(cv2.CAP_PROP_SATURATION, 128)  # Increase saturation
-                self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)  # Adjust brightness
-                self.cap.set(cv2.CAP_PROP_CONTRAST, 128)    # Adjust contrast
-                self.cap.set(cv2.CAP_PROP_AUTO_WB, 1)       # Enable auto white balance
+                # Enhanced color settings
+                self.cap.set(cv2.CAP_PROP_SATURATION, 128)
+                self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+                self.cap.set(cv2.CAP_PROP_CONTRAST, 128)
+                self.cap.set(cv2.CAP_PROP_AUTO_WB, 1)
                 
                 self.camera_available = True
                 print("[INFO] Camera initialized successfully")
@@ -207,147 +206,81 @@ class Camera:
         except Exception as e:
             print(f"[ERROR] Failed to initialize camera: {e}")
             self.camera_available = False
-    # def __init__(self):
-    #     self.cap = None
-    #     self.camera_available = False
-    #     self.gesture_controller = None
-    #     self.max_frame_size = 25000
-        
-    #     try:
-    #         self.cap = cv2.VideoCapture(2)
-    #         if not self.cap.isOpened():
-    #             self.cap = cv2.VideoCapture(0)
-            
-    #         if self.cap.isOpened():
-    #             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    #             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-    #             self.cap.set(cv2.CAP_PROP_FPS, 30)
-    #             self.camera_available = True
-    #             print("[INFO] Camera initialized successfully")
-    #         else:
-    #             print("[WARNING] No camera available")
-    #             self.camera_available = False
-                
-    #     except Exception as e:
-    #         print(f"[ERROR] Failed to initialize camera: {e}")
-    #         self.camera_available = False
 
     def set_gesture_controller(self, gesture_controller):
         """Set reference to gesture controller for drawing overlays"""
         self.gesture_controller = gesture_controller
     
-    # def get_frame(self, apply_overlays=False):
-    #     """
-    #     Get camera frame
-    #     apply_overlays: If True, apply gesture detection overlays (for local display only)
-    #                    If False, return clean frame (for transmission to other clients)
-    #     """
-    #     if not self.camera_available or self.cap is None:
-    #         return None
-            
-    #     try:
-    #         ret, frame = self.cap.read()
-    #         if not ret:
-    #             return None
-                
-    #         # Resize frame to target resolution
-    #         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
-    #         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-    #         # IMPORTANT: Only apply overlays if explicitly requested (for local display)
-    #         if apply_overlays and (self.gesture_controller is not None and 
-    #             hasattr(self.gesture_controller, 'draw_detection_boxes') and
-    #             self.gesture_controller.running):
-    #             frame = self.gesture_controller.draw_detection_boxes(frame)
-            
-    #         if ENABLE_ENCODE:
-    #             # Encode with adaptive quality to meet size limits
-    #             quality = 60
-    #             for attempt in range(3):
-    #                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-    #                 success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
-                    
-    #                 if success and len(encoded_frame) <= self.max_frame_size:
-    #                     return encoded_frame
-    #                 quality -= 20
-                    
-    #             # If still too large, use very low quality
-    #             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 20]
-    #             success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), encode_param)
-    #             return encoded_frame if success else None
-    #         else:
-    #             return frame
-                
-    #     except Exception as e:
-    #         print(f"[ERROR] Camera frame capture failed: {e}")
-    #         return None
     def get_frame(self, apply_overlays=False):
         """
-        FIXED CAMERA FRAME PIPELINE:
-        
-        1. Read ONE frame from camera
-        2. Send a COPY to gesture controller (for detection only)
-        3. Return CLEAN frame for transmission
-        4. Only apply overlays for LOCAL display when requested
-        
-        Key points:
-        - Gesture controller gets its own COPY (never blocks transmission)
-        - Transmission always gets CLEAN frames (no bounding boxes)
-        - Overlays only drawn for local VideoWidget display
-        - Other clients NEVER see gesture detection overlays
+        Get camera frame with AGGRESSIVE compression to meet packet size limits
         """
-        
         if not self.camera_available or self.cap is None:
             return None
 
         try:
-            # Step 1: Read frame from camera
+            # Read frame from camera
             ret, frame = self.cap.read()
             if not ret:
                 return None
 
-            # Step 2: Resize and convert to RGB
+            # Resize to target resolution
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Step 3: Send COPY to gesture controller (if active)
-            # This is for LOCAL detection only - doesn't affect transmission
+            # Send COPY to gesture controller if active (non-blocking)
             if (self.gesture_controller is not None
                 and hasattr(self.gesture_controller, 'update_frame_for_detection')
                 and self.gesture_controller.running):
-                # Send a COPY - gesture controller works independently
-                self.gesture_controller.update_frame_for_detection(frame.copy())
+                try:
+                    self.gesture_controller.update_frame_for_detection(frame.copy())
+                except Exception as e:
+                    print(f"[CAMERA] Gesture update error (non-fatal): {e}")
 
-            # Step 4: Prepare transmission frame (ALWAYS CLEAN)
+            # Prepare transmission frame (ALWAYS CLEAN)
             tx_frame = frame.copy()
             
-            # Step 5: Encode the CLEAN frame for transmission
+            # AGGRESSIVE encoding to meet size limits
             if ENABLE_ENCODE:
-                quality = 80
-                for attempt in range(3):
+                # Start with very low quality
+                quality = 50
+                max_attempts = 5
+                
+                for attempt in range(max_attempts):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
                     success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
-
-                    if success and len(encoded) <= self.max_frame_size:
-                        break
-                    quality -= 15
-
-                if not success or len(encoded) > self.max_frame_size:
-                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
-                    success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
+                    
                     if not success:
+                        print(f"[CAMERA] Encoding failed at quality {quality}")
                         return None
-
-                # For transmission: return encoded CLEAN frame
-                # For local display: the VideoWidget will decode and optionally add overlays
-                return encoded
+                    
+                    # Check size INCLUDING pickle overhead estimate
+                    estimated_packet_size = len(encoded) + 500  # 500 bytes for pickle + Message overhead
+                    
+                    if estimated_packet_size <= self.max_frame_size:
+                        # Success! Packet will fit
+                        return encoded
+                    
+                    # Too large, reduce quality
+                    quality = max(10, quality - 10)
+                    if attempt == max_attempts - 1:
+                        # Last attempt - use minimum quality
+                        print(f"[CAMERA] Warning: Using minimum quality to meet packet size")
+                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 10]
+                        success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
+                        if success and len(encoded) + 500 <= self.max_frame_size:
+                            return encoded
+                        else:
+                            print(f"[CAMERA] ERROR: Cannot encode frame small enough ({len(encoded) + 500} bytes)")
+                            return None
+                
+                return None
             else:
                 return tx_frame
 
         except Exception as e:
             print(f"[ERROR] Camera frame capture failed: {e}")
             return None
-
 
 class VideoControlButton(QPushButton):
     """Circular control button for video interface"""

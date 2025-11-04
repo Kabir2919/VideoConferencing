@@ -27,7 +27,10 @@ FILE = 'File'
 
 # FIXED: Reduced UDP packet sizes to avoid network limits
 # Most networks have MTU of 1500 bytes, so UDP payload should be well under that
-MEDIA_SIZE = {VIDEO: 32000, AUDIO: 2048}  # Much smaller, safer sizes
+MEDIA_SIZE = {
+    VIDEO: 30000,   # ~29KB for encoded frame + overhead
+    AUDIO: 1500     # ~1.5KB for audio data + overhead
+} # Much smaller, safer sizes
 
 
 def send_bytes(self, msg):

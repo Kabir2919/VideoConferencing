@@ -309,16 +309,17 @@ class ServerConnection(QThread):
             try:
                 if media == VIDEO:
                     data = client.get_video()
-                    # FIXED: Skip if no data or if data is too large
                     if data is None:
                         time.sleep(0.033)  # ~30 FPS
                         continue
                         
-                    # Check data size before sending
+                    # Build message and check size BEFORE pickle
                     msg = Message(self.name, POST, media, data)
                     msg_bytes = pickle.dumps(msg)
+                    
+                    # CRITICAL: Check actual pickled size
                     if len(msg_bytes) > MEDIA_SIZE[media]:
-                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]}")
+                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
                         time.sleep(0.033)
                         continue
                         
@@ -328,21 +329,24 @@ class ServerConnection(QThread):
                         time.sleep(0.023)  # ~43 FPS for audio
                         continue
                         
-                    # Check data size before sending
+                    # Build message and check size
                     msg = Message(self.name, POST, media, data)
                     msg_bytes = pickle.dumps(msg)
+                    
+                    # CRITICAL: Check actual pickled size
                     if len(msg_bytes) > MEDIA_SIZE[media]:
-                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]}")
+                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
                         time.sleep(0.023)
                         continue
                 else:
                     print(f"[ERROR] Invalid media type: {media}")
                     break
                     
+                # Send the already-pickled message
                 self.send_msg(conn, msg)
-                consecutive_errors = 0  # Reset error counter on success
+                consecutive_errors = 0
                 
-                # Add appropriate delays
+                # Timing
                 if media == VIDEO:
                     time.sleep(0.033)  # ~30 FPS
                 else:  # AUDIO
@@ -356,7 +360,8 @@ class ServerConnection(QThread):
                     print(f"[ERROR] Too many consecutive errors in {media} broadcast, stopping")
                     break
                     
-                time.sleep(0.1)  # Brief pause before retrying
+                time.sleep(0.1)
+
 
     # def handle_conn(self, conn: socket.socket, media: str):
     #     consecutive_errors = 0
