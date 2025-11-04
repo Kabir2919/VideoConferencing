@@ -17,6 +17,9 @@ IP = "192.168.33.55"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
+# Special marker for camera off state
+CAMERA_OFF_MARKER = b'CAMERA_OFF_MARKER_V1'
+
 
 class Client:
     def __init__(self, name: str, current_device = False):
@@ -39,11 +42,17 @@ class Client:
     def get_video(self):
         """Get video frame for transmission or display"""
         if not self.camera_enabled:
-            self.video_frame = None
-            return None
+            # Send camera off marker instead of None
+            self.video_frame = CAMERA_OFF_MARKER
+            return CAMERA_OFF_MARKER
 
         if self.camera is not None:
             self.video_frame = self.camera.get_frame(apply_overlays=False)
+            
+            # If camera returns None (hardware issue), send camera off marker
+            if self.video_frame is None:
+                self.video_frame = CAMERA_OFF_MARKER
+                return CAMERA_OFF_MARKER
 
         return self.video_frame
     
@@ -56,6 +65,7 @@ class Client:
             self.audio_data = self.microphone.get_data()
 
         return self.audio_data
+
 
 class ServerConnection(QThread):
     add_client_signal = pyqtSignal(Client)
@@ -77,13 +87,13 @@ class ServerConnection(QThread):
         if not self.init_conn(): 
             return
             
-        self.start_conn_threads() # Start receiving threads for all servers
-        self.start_broadcast_threads() # Start sending threads for audio and video
+        self.start_conn_threads()
+        self.start_broadcast_threads()
 
         self.add_client_signal.emit(client)
 
         while self.connected:
-            time.sleep(0.1)  # Prevent busy waiting
+            time.sleep(0.1)
             
         self.disconnect_server()
 
@@ -91,16 +101,13 @@ class ServerConnection(QThread):
         try:
             print(f"[DEBUG] Attempting to connect to {IP}:{MAIN_PORT}")
             
-            # Set socket timeouts
             self.main_socket.settimeout(10.0)
             self.video_socket.settimeout(5.0)
             self.audio_socket.settimeout(5.0)
             
-            # Connect to main server
             self.main_socket.connect((IP, MAIN_PORT))
             print(f"[DEBUG] Connected to main server successfully")
 
-            # Send name and get response
             client.name = self.name
             self.main_socket.send_bytes(self.name.encode())
             conn_status = self.main_socket.recv_bytes().decode()
@@ -114,23 +121,17 @@ class ServerConnection(QThread):
                     window.close()
                 return False
             
-            # Bind UDP sockets to receive data
             try:
-                # Bind to any available port for receiving
-                self.video_socket.bind(('', 0))  # Let OS choose port
-                self.audio_socket.bind(('', 0))  # Let OS choose port
+                self.video_socket.bind(('', 0))
+                self.audio_socket.bind(('', 0))
                 print(f"[DEBUG] UDP sockets bound successfully")
-                print(f"[DEBUG] Video socket bound to: {self.video_socket.getsockname()}")
-                print(f"[DEBUG] Audio socket bound to: {self.audio_socket.getsockname()}")
             except Exception as e:
                 print(f"[ERROR] Failed to bind UDP sockets: {e}")
                 return False
             
-            # Keep timeout for registration phase
             self.video_socket.settimeout(5.0)
             self.audio_socket.settimeout(5.0)
             
-            # Register with media servers with retry
             print(f"[DEBUG] Sending video/audio registration messages")
             max_retries = 3
             for attempt in range(max_retries):
@@ -145,7 +146,6 @@ class ServerConnection(QThread):
                         raise e
                     time.sleep(0.5)
             
-            # Remove socket timeouts for normal operation
             self.main_socket.settimeout(None)
             self.video_socket.settimeout(None)
             self.audio_socket.settimeout(None)
@@ -153,7 +153,6 @@ class ServerConnection(QThread):
             self.connected = True
             print(f"[DEBUG] Connection initialization complete")
             
-            # Small delay to ensure everything is set up
             time.sleep(0.5)
             return True
             
@@ -186,17 +185,13 @@ class ServerConnection(QThread):
         self.threadpool.start(self.audio_broadcast_thread)
     
     def disconnect_server(self):
-        # Signal threads to stop first
         try:
-            # Ensure no further sends will be attempted
             self.connected = False
         except:
             pass
 
-        # Give worker threads a brief chance to exit cleanly
         time.sleep(0.2)
 
-        # Try to send graceful QUIT on main socket (if still open)
         try:
             if getattr(self, 'main_socket', None):
                 try:
@@ -206,7 +201,6 @@ class ServerConnection(QThread):
         except Exception:
             pass
 
-        # Close sockets last
         try:
             if getattr(self, 'main_socket', None):
                 self.main_socket.close()
@@ -233,8 +227,8 @@ class ServerConnection(QThread):
             if msg.data_type in [VIDEO, AUDIO]:
                 max_size = MEDIA_SIZE[msg.data_type]
                 if len(msg_bytes) > max_size:
+                    print(f"[WARNING] {msg.data_type} packet too large: {len(msg_bytes)} bytes - SKIPPING")
                     return
-                # sendto might raise OSError if socket closed
                 conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
             else:
                 conn.send_bytes(msg_bytes)
@@ -243,16 +237,13 @@ class ServerConnection(QThread):
             errnum = getattr(e, 'errno', None)
             is_udp = getattr(conn, 'type', None) == socket.SOCK_DGRAM
 
-            # Benign: operation on closed UDP socket – just ignore
             if is_udp and (winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN)):
                 return
 
-            # For TCP/main socket: treat as disconnect (only if it's the TCP socket)
             if not is_udp and (winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN, errno.ECONNRESET)):
                 self.connected = False
                 return
 
-            # Otherwise log
             print(f"[ERROR] Send failed: {e}")
         except Exception as e:
             print(f"[ERROR] Send failed: {e}")
@@ -267,7 +258,6 @@ class ServerConnection(QThread):
                         break
                     msg = Message(self.name, POST, FILE, data, to_names)
                     self.send_msg(self.main_socket, msg)
-                # Send end-of-file marker
                 msg = Message(self.name, POST, FILE, None, to_names)
                 self.send_msg(self.main_socket, msg)
             self.add_msg_signal.emit(self.name, f"File {filename} sent.")
@@ -282,15 +272,17 @@ class ServerConnection(QThread):
             try:
                 if media == VIDEO:
                     data = client.get_video()
+                    
+                    # CRITICAL: Always send something, even if camera is off
                     if data is None:
-                        time.sleep(0.033)  # ~30 FPS
-                        continue
-                        
-                    # Build message and check size BEFORE pickle
+                        # Fallback - should not happen with new logic
+                        data = CAMERA_OFF_MARKER
+                    
+                    # Build message
                     msg = Message(self.name, POST, media, data)
                     msg_bytes = pickle.dumps(msg)
                     
-                    # CRITICAL: Check actual pickled size
+                    # Check size
                     if len(msg_bytes) > MEDIA_SIZE[media]:
                         print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
                         time.sleep(0.033)
@@ -299,14 +291,12 @@ class ServerConnection(QThread):
                 elif media == AUDIO:
                     data = client.get_audio()
                     if data is None:
-                        time.sleep(0.023)  # ~43 FPS for audio
+                        time.sleep(0.023)
                         continue
                         
-                    # Build message and check size
                     msg = Message(self.name, POST, media, data)
                     msg_bytes = pickle.dumps(msg)
                     
-                    # CRITICAL: Check actual pickled size
                     if len(msg_bytes) > MEDIA_SIZE[media]:
                         print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
                         time.sleep(0.023)
@@ -315,11 +305,9 @@ class ServerConnection(QThread):
                     print(f"[ERROR] Invalid media type: {media}")
                     break
                     
-                # Send the already-pickled message
                 self.send_msg(conn, msg)
                 consecutive_errors = 0
                 
-                # Timing
                 if media == VIDEO:
                     time.sleep(0.033)  # ~30 FPS
                 else:  # AUDIO
@@ -351,7 +339,6 @@ class ServerConnection(QThread):
                     
                 if not msg_bytes:
                     time.sleep(0.01)
-                    print(f"[{media}] Empty message received, connection may be closed")
                     continue
                     
                 try:
@@ -368,16 +355,15 @@ class ServerConnection(QThread):
                     break
                     
                 self.handle_msg(msg)
-                consecutive_errors = 0  # Reset on successful message handling
+                consecutive_errors = 0
                 
             except socket.timeout:
-                continue  # Timeout is normal, just continue
+                continue
             except (ConnectionResetError, OSError, socket.error) as e:
                 winerr = getattr(e, 'winerror', None)
                 errnum = getattr(e, 'errno', None)
                 is_udp = media in [VIDEO, AUDIO]
                 
-                # Benign UDP socket errors
                 if is_udp and (winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN)):
                     print(f"[{media}] Socket closed (benign); exiting handler.")
                     break
@@ -394,11 +380,11 @@ class ServerConnection(QThread):
                 time.sleep(0.1)
         
         print(f"[{media}] Handler thread exiting")
-        if media == TEXT:  # Main connection handler
+        if media == TEXT:
             self.connected = False
 
     def handle_msg(self, msg: Message):
-        """Handle received message - FIXED INDENTATION"""
+        """Handle received message with camera off marker support"""
         global all_clients
         client_name = msg.from_name
         
@@ -408,7 +394,12 @@ class ServerConnection(QThread):
                 return
                 
             if msg.data_type == VIDEO:
-                all_clients[client_name].video_frame = msg.data
+                # Check if this is a camera off marker
+                if msg.data == CAMERA_OFF_MARKER:
+                    all_clients[client_name].video_frame = None
+                else:
+                    all_clients[client_name].video_frame = msg.data
+                    
             elif msg.data_type == AUDIO:
                 all_clients[client_name].audio_data = msg.data
             elif msg.data_type == TEXT:
@@ -435,7 +426,6 @@ class ServerConnection(QThread):
     def handle_file_message(self, msg, client_name):
         """Handle file transfer messages"""
         if isinstance(msg.data, str):
-            # Start of file transfer - filename
             if os.path.exists(msg.data):
                 filename, ext = os.path.splitext(msg.data)
                 i = 1
@@ -444,14 +434,12 @@ class ServerConnection(QThread):
                 msg.data = f"{filename}({i}){ext}"
             self.recieving_filename = msg.data
             with open(self.recieving_filename, 'wb') as f:
-                pass  # Create empty file
+                pass
         elif msg.data is None:
-            # End of file transfer
             if self.recieving_filename:
                 self.add_msg_signal.emit(client_name, f"File {self.recieving_filename} received.")
                 self.recieving_filename = None
         else:
-            # File data chunk
             if self.recieving_filename:
                 with open(self.recieving_filename, 'ab') as f:
                     f.write(msg.data)
