@@ -283,46 +283,46 @@ class Camera:
     #         return None
     def get_frame(self, apply_overlays=False):
         """
-        CAMERA FRAME PIPELINE — FIXED ✅
-        • Always return a CLEAN frame for network
-        • Gesture detection only reads a COPY
-        • Overlays only drawn for local preview
+        FIXED CAMERA FRAME PIPELINE:
+        
+        1. Read ONE frame from camera
+        2. Send a COPY to gesture controller (for detection only)
+        3. Return CLEAN frame for transmission
+        4. Only apply overlays for LOCAL display when requested
+        
+        Key points:
+        - Gesture controller gets its own COPY (never blocks transmission)
+        - Transmission always gets CLEAN frames (no bounding boxes)
+        - Overlays only drawn for local VideoWidget display
+        - Other clients NEVER see gesture detection overlays
         """
-
+        
         if not self.camera_available or self.cap is None:
             return None
 
         try:
+            # Step 1: Read frame from camera
             ret, frame = self.cap.read()
             if not ret:
                 return None
 
-            # Resize + RGB always first
+            # Step 2: Resize and convert to RGB
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # ✅ Copy for TX (clean)
-            tx_frame = frame.copy()
-
-            # ✅ Send COPY to gesture controller ONLY
+            # Step 3: Send COPY to gesture controller (if active)
+            # This is for LOCAL detection only - doesn't affect transmission
             if (self.gesture_controller is not None
                 and hasattr(self.gesture_controller, 'update_frame_for_detection')
                 and self.gesture_controller.running):
-                self.gesture_controller.update_frame_for_detection(frame.copy())  # NEVER shared buffer
+                # Send a COPY - gesture controller works independently
+                self.gesture_controller.update_frame_for_detection(frame.copy())
 
-            # ✅ Local preview image (may overlay boxes)
-            display_frame = tx_frame
-            if apply_overlays:
-                if (self.gesture_controller is not None
-                    and hasattr(self.gesture_controller, 'draw_detection_boxes')
-                    and self.gesture_controller.running):
-                    display_frame = self.gesture_controller.draw_detection_boxes(frame.copy())
-
-            # ✅ If the local widget requested overlay → return overlay image for UI
-            # BUT → only encode and return clean tx_frame
-            encoded = None
+            # Step 4: Prepare transmission frame (ALWAYS CLEAN)
+            tx_frame = frame.copy()
+            
+            # Step 5: Encode the CLEAN frame for transmission
             if ENABLE_ENCODE:
-                # Encode ONLY clean TX FRAME
                 quality = 80
                 for attempt in range(3):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
@@ -332,16 +332,16 @@ class Camera:
                         break
                     quality -= 15
 
-                if encoded is None:
+                if not success or len(encoded) > self.max_frame_size:
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
                     success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
                     if not success:
                         return None
 
-                return encoded  # ✅ Transmit clean-only frame
-
+                # For transmission: return encoded CLEAN frame
+                # For local display: the VideoWidget will decode and optionally add overlays
+                return encoded
             else:
-                # No compression
                 return tx_frame
 
         except Exception as e:
@@ -621,26 +621,57 @@ class VideoWidget(QWidget):
         self.timer.start(30)
     
     def update_video(self):
-        # IMPORTANT: Only apply overlays for the current device's own video
+        """
+        FIXED VIDEO DISPLAY PIPELINE:
+        
+        For LOCAL client (current device):
+        - Get frame (already encoded and clean)
+        - Decode it
+        - Apply gesture overlays ONLY for local display
+        - This overlay is NEVER transmitted
+        
+        For REMOTE clients:
+        - Get received frame (from network)
+        - Decode it
+        - Display as-is (no overlays)
+        """
+        
+        # Get the frame
         if self.client.current_device:
-            # For local display, get frame WITH overlays
-            frame = self.client.camera.get_frame(apply_overlays=True) if self.client.camera else None
+            # LOCAL: Get our own camera frame (clean, encoded)
+            frame = self.client.camera.get_frame(apply_overlays=False) if self.client.camera else None
         else:
-            # For other clients, just get the received frame (no overlays)
+            # REMOTE: Get frame received from network (already clean)
             frame = self.client.get_video()
         
+        # Handle no frame
         if frame is None:
             frame = NOCAM_FRAME.copy()
         elif ENABLE_ENCODE:
+            # Decode the frame
             frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
+        # Resize to display size
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
         
+        # Apply gesture overlays ONLY for local display
+        if self.client.current_device:
+            # Check if gesture controller is active
+            camera = self.client.camera
+            if (camera and camera.gesture_controller is not None
+                and hasattr(camera.gesture_controller, 'draw_detection_boxes')
+                and camera.gesture_controller.running):
+                # Apply overlays to LOCAL display only
+                frame = camera.gesture_controller.draw_detection_boxes(frame)
+        
+        # Add microphone indicator if no audio
         if self.client.audio_data is None:
             nomic_h, nomic_w, _ = NOMIC_FRAME.shape
             x, y = FRAME_WIDTH//2 - nomic_w//2, FRAME_HEIGHT - 50
             frame[y:y+nomic_h, x:x+nomic_w] = NOMIC_FRAME.copy()
 
+        # Display the frame
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)

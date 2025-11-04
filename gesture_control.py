@@ -9,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    FIXED: No longer reads frames directly, uses shared frame buffer instead.
+    FIXED: Uses shared frame buffer - completely local processing
     """
     
     camera_control_signal = pyqtSignal(bool)
@@ -36,11 +36,11 @@ class GestureController(QThread):
         self.face_absent_threshold = 30
         self.face_present_threshold = 10
         
-        # Visual feedback variables
+        # Visual feedback variables (LOCAL DISPLAY ONLY)
         self.show_detection_boxes = True
         self.detection_results = None
         
-        # CRITICAL FIX: Shared frame buffer for detection
+        # Shared frame buffer for detection (separate from transmission)
         self.last_detection_frame = None
         self.frame_lock = threading.Lock()
         
@@ -49,7 +49,7 @@ class GestureController(QThread):
         self.status_update_signal.connect(self.update_status)
     
     def run(self):
-        """Main thread loop - FIXED: No longer reads camera directly"""
+        """Main thread loop - processes frames from shared buffer"""
         self.running = True
         self.status_update_signal.emit("Gesture Control: Started - Face detection active")
         
@@ -60,7 +60,7 @@ class GestureController(QThread):
         
         while self.running:
             try:
-                # CRITICAL FIX: Get frame from shared buffer instead of reading camera
+                # Get frame from shared buffer
                 with self.frame_lock:
                     if self.last_detection_frame is None:
                         time.sleep(0.05)
@@ -69,17 +69,16 @@ class GestureController(QThread):
                     # Work on a copy to avoid threading issues
                     frame = self.last_detection_frame.copy()
                 
-                # Convert BGR to RGB for MediaPipe (if needed)
+                # Convert to RGB if needed (MediaPipe expects RGB)
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Assume it's RGB from camera, convert to RGB for MediaPipe
-                    rgb_frame = frame  # Already RGB from get_frame()
+                    rgb_frame = frame  # Already RGB from camera
                 else:
                     rgb_frame = frame
                 
                 # Process frame for face detection
                 results = self.face_detection.process(rgb_frame)
                 
-                # Store detection results for drawing
+                # Store detection results for LOCAL drawing only
                 self.detection_results = results
                 
                 # Check if face is detected
@@ -88,7 +87,7 @@ class GestureController(QThread):
                 # Update face detection counters
                 self.update_face_counters(face_detected)
                 
-                # Control camera based on face detection
+                # Control camera based on face detection (LOCAL STATE ONLY)
                 self.handle_camera_control(face_detected)
                 
                 # Small delay to prevent excessive CPU usage
@@ -103,22 +102,28 @@ class GestureController(QThread):
     def update_frame_for_detection(self, frame):
         """
         Update the frame buffer for gesture detection
-        Called by Camera.get_frame() to provide frames
+        Called by Camera.get_frame() to provide frames for detection
+        This is LOCAL ONLY - doesn't affect transmission
         """
         with self.frame_lock:
             self.last_detection_frame = frame.copy()
     
     def draw_detection_boxes(self, frame):
-        """Draw detection boxes and landmarks on the frame"""
+        """
+        Draw detection boxes on frame for LOCAL DISPLAY ONLY
+        This is NEVER transmitted to other clients
+        """
         if not self.show_detection_boxes or self.detection_results is None:
             return frame
         
-        # Convert frame to BGR for OpenCV drawing
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            # Assume it's RGB, convert to BGR for OpenCV
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Work on a copy
+        display_frame = frame.copy()
+        
+        # Convert to BGR for OpenCV drawing
+        if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
+            frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
         else:
-            frame_bgr = frame.copy()
+            frame_bgr = display_frame.copy()
         
         height, width = frame_bgr.shape[:2]
         
@@ -173,7 +178,7 @@ class GestureController(QThread):
                     for keypoint in detection.location_data.relative_keypoints:
                         kp_x = int(keypoint.x * width)
                         kp_y = int(keypoint.y * height)
-                        cv2.circle(frame_bgr, (kp_x, kp_y), 3, (255, 0, 0), -1)  # Blue dots for keypoints
+                        cv2.circle(frame_bgr, (kp_x, kp_y), 3, (255, 0, 0), -1)
         
         # Add status text
         status_text = f"Faces: {len(self.detection_results.detections) if self.detection_results.detections else 0}"
@@ -204,7 +209,7 @@ class GestureController(QThread):
             2
         )
         
-        # Convert back to RGB if needed
+        # Convert back to RGB
         if len(frame.shape) == 3 and frame.shape[2] == 3:
             return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         else:
@@ -220,7 +225,10 @@ class GestureController(QThread):
             self.face_present_counter = 0
     
     def handle_camera_control(self, face_detected):
-        """Handle camera on/off based on face detection with stability checks"""
+        """
+        Handle camera on/off based on face detection
+        This only affects LOCAL state - transmitted automatically
+        """
         current_camera_state = self.main_window.client.camera_enabled
         
         # Turn off camera if no face detected for threshold frames
@@ -240,7 +248,7 @@ class GestureController(QThread):
             self.status_update_signal.emit("Gesture Control: Face detected - Camera turned ON")
     
     def control_camera(self, enable):
-        """Control camera state via main window"""
+        """Control LOCAL camera state - changes are transmitted automatically"""
         if enable != self.main_window.client.camera_enabled:
             self.main_window.toggle_camera()
     
@@ -252,10 +260,10 @@ class GestureController(QThread):
         """Stop the gesture control thread"""
         self.running = False
         if self.isRunning():
-            self.wait(3000)  # Wait up to 3 seconds for thread to finish
+            self.wait(3000)
     
     def toggle_detection_boxes(self, show=None):
-        """Toggle visibility of detection boxes"""
+        """Toggle visibility of detection boxes (LOCAL DISPLAY ONLY)"""
         if show is None:
             self.show_detection_boxes = not self.show_detection_boxes
         else:
@@ -265,10 +273,7 @@ class GestureController(QThread):
         self.status_update_signal.emit(f"Gesture Control: Detection boxes {status}")
     
     def set_face_detection_sensitivity(self, sensitivity):
-        """
-        Adjust face detection sensitivity
-        sensitivity: float between 0.1 and 1.0
-        """
+        """Adjust face detection sensitivity"""
         self.face_detection = self.mp_face_detection.FaceDetection(
             model_selection=0,
             min_detection_confidence=sensitivity
@@ -276,11 +281,7 @@ class GestureController(QThread):
         self.status_update_signal.emit(f"Gesture Control: Sensitivity set to {sensitivity}")
     
     def set_thresholds(self, absent_threshold=30, present_threshold=10):
-        """
-        Set custom thresholds for camera control
-        absent_threshold: frames without face before turning off camera
-        present_threshold: frames with face before turning on camera
-        """
+        """Set custom thresholds for camera control"""
         self.face_absent_threshold = absent_threshold
         self.face_present_threshold = present_threshold
         self.status_update_signal.emit(
@@ -290,7 +291,7 @@ class GestureController(QThread):
 
 
 class AdvancedGestureController(GestureController):
-    """Extended gesture controller with hand gestures"""
+    """Extended gesture controller with hand gestures - ALL LOCAL"""
     
     def __init__(self, main_window, parent=None):
         super().__init__(main_window, parent)
@@ -309,7 +310,7 @@ class AdvancedGestureController(GestureController):
         self.hand_results = None
     
     def run(self):
-        """FIXED: Enhanced run method - no direct camera reading"""
+        """Enhanced run method with hand detection - ALL LOCAL"""
         self.running = True
         self.status_update_signal.emit("Advanced Gesture Control: Started - Face + Hand detection active")
         
@@ -320,7 +321,7 @@ class AdvancedGestureController(GestureController):
         
         while self.running:
             try:
-                # CRITICAL FIX: Get frame from shared buffer
+                # Get frame from shared buffer
                 with self.frame_lock:
                     if self.last_detection_frame is None:
                         time.sleep(0.05)
@@ -328,7 +329,7 @@ class AdvancedGestureController(GestureController):
                     
                     frame = self.last_detection_frame.copy()
                 
-                rgb_frame = frame  # Already RGB from get_frame()
+                rgb_frame = frame
                 
                 # Face detection
                 face_results = self.face_detection.process(rgb_frame)
@@ -339,7 +340,7 @@ class AdvancedGestureController(GestureController):
                 self.update_face_counters(face_detected)
                 self.handle_camera_control(face_detected)
                 
-                # Hand gesture detection
+                # Hand gesture detection (LOCAL ONLY)
                 hand_results = self.hands.process(rgb_frame)
                 self.hand_results = hand_results
                 
@@ -355,18 +356,21 @@ class AdvancedGestureController(GestureController):
         self.status_update_signal.emit("Advanced Gesture Control: Stopped")
     
     def draw_detection_boxes(self, frame):
-        """Enhanced drawing with hand landmarks"""
+        """Enhanced drawing with hand landmarks - LOCAL DISPLAY ONLY"""
         # First draw face detection boxes
         frame = super().draw_detection_boxes(frame)
         
         if not self.show_detection_boxes or self.hand_results is None:
             return frame
         
-        # Convert frame to BGR for OpenCV drawing
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Work on a copy
+        display_frame = frame.copy()
+        
+        # Convert to BGR for OpenCV
+        if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
+            frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
         else:
-            frame_bgr = frame.copy()
+            frame_bgr = display_frame.copy()
         
         height, width = frame_bgr.shape[:2]
         
@@ -382,7 +386,7 @@ class AdvancedGestureController(GestureController):
                     self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
                 )
                 
-                # Get hand classification (Left/Right)
+                # Get hand classification
                 hand_label = "Hand"
                 if self.hand_results.multi_handedness:
                     if hand_idx < len(self.hand_results.multi_handedness):
@@ -427,16 +431,15 @@ class AdvancedGestureController(GestureController):
                     1
                 )
         
-        # Convert back to RGB if needed
+        # Convert back to RGB
         if len(frame.shape) == 3 and frame.shape[2] == 3:
             return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         else:
             return frame_bgr
     
     def process_hand_gestures(self, hand_landmarks_list):
-        """Process hand gestures for additional controls"""
+        """Process hand gestures for additional LOCAL controls"""
         for hand_landmarks in hand_landmarks_list:
-            # Simple gesture detection based on finger positions
             gesture = self.detect_gesture(hand_landmarks)
             
             if gesture == self.last_gesture:
@@ -445,16 +448,13 @@ class AdvancedGestureController(GestureController):
                 self.gesture_counter = 0
                 self.last_gesture = gesture
             
-            # Execute gesture command if stable
+            # Execute gesture command if stable (affects LOCAL state only)
             if self.gesture_counter >= self.gesture_threshold:
                 self.execute_gesture_command(gesture)
-                self.gesture_counter = 0  # Reset to prevent repeated execution
+                self.gesture_counter = 0
     
     def detect_gesture(self, hand_landmarks):
-        """
-        Simple gesture detection based on landmark positions
-        Returns gesture name or None
-        """
+        """Simple gesture detection based on landmark positions"""
         landmarks = hand_landmarks.landmark
         
         # Get key landmark positions
@@ -471,13 +471,13 @@ class AdvancedGestureController(GestureController):
             middle_tip.y > middle_pip.y):
             return "thumbs_up"
         
-        # Peace sign / Victory (end call)
+        # Peace sign
         if (index_tip.y < index_pip.y and 
             middle_tip.y < middle_pip.y and 
             thumb_tip.y > thumb_ip.y):
             return "peace_sign"
         
-        # Open palm (wave hello - could be used for other features)
+        # Open palm
         fingers_extended = sum([
             thumb_tip.y < thumb_ip.y,
             index_tip.y < index_pip.y,
@@ -494,40 +494,36 @@ class AdvancedGestureController(GestureController):
         return None
     
     def execute_gesture_command(self, gesture):
-        """Execute command based on detected gesture"""
+        """Execute command based on detected gesture (affects LOCAL state only)"""
         if gesture == "thumbs_up":
-            # Toggle microphone
+            # Toggle LOCAL microphone
             current_mic_state = self.main_window.client.microphone_enabled
             self.main_window.toggle_microphone()
             status = "ON" if not current_mic_state else "OFF"
             self.status_update_signal.emit(f"Gesture Control: Thumbs up detected - Microphone turned {status}")
         
         elif gesture == "peace_sign":
-            # Could be used for end call or other features
             self.status_update_signal.emit("Gesture Control: Peace sign detected - Feature not implemented")
         
         elif gesture == "open_palm":
-            # Could be used for waving or attention features
             self.status_update_signal.emit("Gesture Control: Open palm detected - Wave hello!")
 
-def integrate_gesture_control(main_window):
-    """
-    Helper function to integrate gesture control with the main window
-    """
-    # Check if MediaPipe is available
-    try:
-        import mediapipe
-    except ImportError:
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.warning(
-            main_window, 
-            "Missing Dependency", 
-            "MediaPipe library is required for gesture control.\n"
-            "Please install it using: pip install mediapipe"
-        )
-        return None
-    
-    # Create gesture controller instance (use AdvancedGestureController for hand gestures too)
-    gesture_controller = AdvancedGestureController(main_window)
-    
-    return gesture_controller
+
+    def integrate_gesture_control(main_window):
+        """Helper function to integrate gesture control with the main window"""
+        try:
+            import mediapipe
+        except ImportError:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                main_window, 
+                "Missing Dependency", 
+                "MediaPipe library is required for gesture control.\n"
+                "Please install it using: pip install mediapipe"
+            )
+            return None
+        
+        # Create gesture controller (use Advanced for hand gestures)
+        gesture_controller = AdvancedGestureController(main_window)
+        
+        return gesture_controller
