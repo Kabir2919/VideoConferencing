@@ -283,54 +283,71 @@ class Camera:
     #         return None
     def get_frame(self, apply_overlays=False):
         """
-        Get camera frame
-        FIXED: Provides frames to gesture controller instead of letting it read directly
+        CAMERA FRAME PIPELINE — FIXED ✅
+        • Always return a CLEAN frame for network
+        • Gesture detection only reads a COPY
+        • Overlays only drawn for local preview
         """
+
         if not self.camera_available or self.cap is None:
             return None
-            
+
         try:
             ret, frame = self.cap.read()
             if not ret:
                 return None
-                
-            # Resize frame to target resolution
+
+            # Resize + RGB always first
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # CRITICAL FIX: Update gesture controller with this frame
-            if self.gesture_controller is not None and hasattr(self.gesture_controller, 'update_frame_for_detection'):
-                self.gesture_controller.update_frame_for_detection(frame)
-            
-            # Work on a copy for overlays to prevent contamination
-            frame_copy = frame.copy()
-            
-            # Only apply overlays if explicitly requested (for local display)
-            if apply_overlays and (self.gesture_controller is not None and 
-                hasattr(self.gesture_controller, 'draw_detection_boxes') and
-                self.gesture_controller.running):
-                frame_copy = self.gesture_controller.draw_detection_boxes(frame_copy)
-            
-            # Encode the frame
+
+            # ✅ Copy for TX (clean)
+            tx_frame = frame.copy()
+
+            # ✅ Send COPY to gesture controller ONLY
+            if (self.gesture_controller is not None
+                and hasattr(self.gesture_controller, 'update_frame_for_detection')
+                and self.gesture_controller.running):
+                self.gesture_controller.update_frame_for_detection(frame.copy())  # NEVER shared buffer
+
+            # ✅ Local preview image (may overlay boxes)
+            display_frame = tx_frame
+            if apply_overlays:
+                if (self.gesture_controller is not None
+                    and hasattr(self.gesture_controller, 'draw_detection_boxes')
+                    and self.gesture_controller.running):
+                    display_frame = self.gesture_controller.draw_detection_boxes(frame.copy())
+
+            # ✅ If the local widget requested overlay → return overlay image for UI
+            # BUT → only encode and return clean tx_frame
+            encoded = None
             if ENABLE_ENCODE:
+                # Encode ONLY clean TX FRAME
                 quality = 80
                 for attempt in range(3):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-                    success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame_copy, cv2.COLOR_RGB2BGR), encode_param)
-                    
-                    if success and len(encoded_frame) <= self.max_frame_size:
-                        return encoded_frame
+                    success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
+
+                    if success and len(encoded) <= self.max_frame_size:
+                        break
                     quality -= 15
-                    
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
-                success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame_copy, cv2.COLOR_RGB2BGR), encode_param)
-                return encoded_frame if success else None
+
+                if encoded is None:
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
+                    success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
+                    if not success:
+                        return None
+
+                return encoded  # ✅ Transmit clean-only frame
+
             else:
-                return frame_copy
-                
+                # No compression
+                return tx_frame
+
         except Exception as e:
             print(f"[ERROR] Camera frame capture failed: {e}")
             return None
+
 
 class VideoControlButton(QPushButton):
     """Circular control button for video interface"""
