@@ -10,18 +10,22 @@ class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
     LOCAL ONLY: Never interferes with network transmission.
-    FIXED: Asynchronous initialization to prevent blocking
+    FIXED: Proper async init + Option to control camera transmission
     """
 
     status_update_signal = pyqtSignal(str)
     initialization_complete_signal = pyqtSignal(bool)
+    camera_control_signal = pyqtSignal(bool)  # NEW: Signal to control camera state
 
-    def __init__(self, main_window, parent=None):
+    def __init__(self, main_window, control_transmission=False, parent=None):
         super().__init__(parent)
         self.main_window = main_window
         self.running = False
         self.initialized = False
         self.face_detection_enabled = True
+        
+        # NEW: Control whether to affect camera transmission or just local preview
+        self.control_transmission = control_transmission
 
         # MediaPipe setup - will be initialized in background
         self.mp_face_detection = None
@@ -43,12 +47,16 @@ class GestureController(QThread):
         self.last_detection_frame = None
         self.frame_lock = threading.Lock()
 
-        # Local preview hide flag (does NOT affect transmission)
+        # Local preview hide flag (does NOT affect transmission by default)
         self.local_hide_camera = False
 
         # Connect status signal
         self.status_update_signal.connect(self.update_status)
         self.initialization_complete_signal.connect(self.on_initialization_complete)
+        
+        # NEW: Connect camera control signal if controlling transmission
+        if self.control_transmission:
+            self.camera_control_signal.connect(self.main_window.toggle_camera)
 
     def run(self):
         """Main thread loop with async initialization"""
@@ -67,6 +75,14 @@ class GestureController(QThread):
             self.mp_drawing = mp.solutions.drawing_utils
             
             # This is the blocking part - do it in the worker thread
+            # Use lower priority thread to avoid blocking network operations
+            import os
+            if hasattr(os, 'nice'):
+                try:
+                    os.nice(5)  # Lower priority on Unix
+                except:
+                    pass
+            
             self.face_detection = self.mp_face_detection.FaceDetection(
                 model_selection=0,
                 min_detection_confidence=0.5
@@ -74,7 +90,8 @@ class GestureController(QThread):
             
             self.initialized = True
             self.initialization_complete_signal.emit(True)
-            self.status_update_signal.emit("Gesture Control: Started - Face detection active")
+            mode = "with camera control" if self.control_transmission else "preview only"
+            self.status_update_signal.emit(f"Gesture Control: Started ({mode})")
             
         except Exception as e:
             self.initialized = False
@@ -102,9 +119,14 @@ class GestureController(QThread):
                 # Face present?
                 face_detected = results.detections is not None and len(results.detections) > 0
 
-                # Update counters & apply local-only behavior
+                # Update counters & apply behavior
                 self.update_face_counters(face_detected)
-                self.handle_local_hide(face_detected)
+                
+                # FIXED: Choose behavior based on control mode
+                if self.control_transmission:
+                    self.handle_camera_transmission(face_detected)
+                else:
+                    self.handle_local_hide(face_detected)
 
                 time.sleep(0.1)  # limit CPU usage
 
@@ -123,17 +145,12 @@ class GestureController(QThread):
         """
         Update the frame buffer for gesture detection.
         Called by Camera.get_frame() to provide frames for detection.
-        LOCAL ONLY - doesn't affect transmission.
         """
-        # Accept frames even if not fully initialized — they’ll be used once ready
-        # This prevents frame starvation during startup and avoids startup lag.
         try:
             with self.frame_lock:
                 self.last_detection_frame = frame.copy()
         except Exception as e:
-            # Failsafe: log but don’t crash if frame is invalid or lock fails
             print(f"[GestureControl] Warning: failed to update frame for detection: {e}")
-
 
     def draw_detection_boxes(self, frame):
         """
@@ -154,7 +171,7 @@ class GestureController(QThread):
                 y = max(40, (blank.shape[0] // 2))
                 cv2.putText(blank, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             except:
-                pass  # Silently fail if text rendering has issues
+                pass
             return blank
 
         if not self.show_detection_boxes or self.detection_results is None:
@@ -274,9 +291,30 @@ class GestureController(QThread):
             self.face_absent_counter += 1
             self.face_present_counter = 0
 
+    def handle_camera_transmission(self, face_detected):
+        """
+        NEW: Control actual camera transmission based on face presence.
+        This will turn the camera on/off for ALL clients.
+        """
+        current_camera_state = self.main_window.client.camera_enabled
+        
+        # Turn off camera after sustained absence
+        if (not face_detected
+                and self.face_absent_counter >= self.face_absent_threshold
+                and current_camera_state):
+            self.camera_control_signal.emit(False)  # Turn camera OFF
+            self.status_update_signal.emit("Gesture: Face lost → Camera transmission OFF")
+
+        # Turn on camera after sustained presence
+        if (face_detected
+                and self.face_present_counter >= self.face_present_threshold
+                and not current_camera_state):
+            self.camera_control_signal.emit(True)  # Turn camera ON
+            self.status_update_signal.emit("Gesture: Face detected → Camera transmission ON")
+
     def handle_local_hide(self, face_detected):
         """
-        Option B: Only hide/show LOCAL preview based on face presence.
+        Original: Only hide/show LOCAL preview based on face presence.
         Never toggles camera transmission.
         """
         # Hide local preview after sustained absence
@@ -330,19 +368,35 @@ class GestureController(QThread):
             self.status_update_signal.emit(f"Gesture: Failed to set sensitivity - {str(e)}")
 
     def set_thresholds(self, absent_threshold=30, present_threshold=10):
-        """Set custom thresholds for local preview behavior"""
+        """Set custom thresholds for behavior"""
         self.face_absent_threshold = absent_threshold
         self.face_present_threshold = present_threshold
         self.status_update_signal.emit(
             f"Gesture: Thresholds updated - Absent: {absent_threshold}, Present: {present_threshold}"
         )
 
+    def set_control_mode(self, control_transmission):
+        """Change control mode at runtime"""
+        old_mode = self.control_transmission
+        self.control_transmission = control_transmission
+        
+        if old_mode != control_transmission:
+            if control_transmission:
+                self.camera_control_signal.connect(self.main_window.toggle_camera)
+                self.status_update_signal.emit("Gesture: Switched to CAMERA CONTROL mode")
+            else:
+                try:
+                    self.camera_control_signal.disconnect(self.main_window.toggle_camera)
+                except:
+                    pass
+                self.status_update_signal.emit("Gesture: Switched to PREVIEW ONLY mode")
+
 
 class AdvancedGestureController(GestureController):
     """Extended gesture controller with hand gestures - ALL LOCAL"""
 
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, parent)
+    def __init__(self, main_window, control_transmission=False, parent=None):
+        super().__init__(main_window, control_transmission, parent)
 
         self.mp_hands = None
         self.hands = None
@@ -353,7 +407,7 @@ class AdvancedGestureController(GestureController):
         self.hand_results = None
 
     def run(self):
-        """Enhanced run method with hand detection - ALL LOCAL"""
+        """Enhanced run method with hand detection"""
         self.running = True
         self.status_update_signal.emit("Advanced Gesture Control: Initializing...")
 
@@ -362,9 +416,17 @@ class AdvancedGestureController(GestureController):
             self.status_update_signal.emit("Gesture Control: Error - No camera available")
             return
 
-        # Initialize MediaPipe in background (non-blocking)
+        # Initialize MediaPipe in background
         try:
             self.status_update_signal.emit("Advanced Gesture Control: Loading models...")
+            
+            # Lower thread priority
+            import os
+            if hasattr(os, 'nice'):
+                try:
+                    os.nice(5)
+                except:
+                    pass
             
             # Face detection
             self.mp_face_detection = mp.solutions.face_detection
@@ -385,7 +447,8 @@ class AdvancedGestureController(GestureController):
             
             self.initialized = True
             self.initialization_complete_signal.emit(True)
-            self.status_update_signal.emit("Advanced Gesture Control: Started - Face + Hand detection active")
+            mode = "with camera control" if self.control_transmission else "preview only"
+            self.status_update_signal.emit(f"Advanced Gesture Control: Started ({mode})")
             
         except Exception as e:
             self.initialized = False
@@ -410,7 +473,12 @@ class AdvancedGestureController(GestureController):
                 self.detection_results = face_results
 
                 self.update_face_counters(face_detected)
-                self.handle_local_hide(face_detected)
+                
+                # Apply behavior based on mode
+                if self.control_transmission:
+                    self.handle_camera_transmission(face_detected)
+                else:
+                    self.handle_local_hide(face_detected)
 
                 # Hand gesture detection (LOCAL ONLY)
                 hand_results = self.hands.process(rgb_frame)
@@ -427,12 +495,13 @@ class AdvancedGestureController(GestureController):
 
         self.status_update_signal.emit("Advanced Gesture Control: Stopped")
 
+    # ... (rest of the AdvancedGestureController methods remain the same)
     def draw_detection_boxes(self, frame):
         """Enhanced drawing with hand landmarks - LOCAL DISPLAY ONLY"""
         if not self.initialized:
             return frame
             
-        # Respect local preview hide first (super handles this & face boxes)
+        # Respect local preview hide first
         frame = super().draw_detection_boxes(frame)
         if self.local_hide_camera:
             return frame
@@ -443,7 +512,6 @@ class AdvancedGestureController(GestureController):
         display_frame = frame.copy()
 
         try:
-            # Convert to BGR for drawing
             if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
                 frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
             else:
@@ -462,17 +530,14 @@ class AdvancedGestureController(GestureController):
                         self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
                     )
 
-                    # Hand classification
                     hand_label = "Hand"
                     if self.hand_results.multi_handedness and hand_idx < len(self.hand_results.multi_handedness):
                         hand_label = self.hand_results.multi_handedness[hand_idx].classification[0].label
 
-                    # Current gesture
                     current_gesture = self.detect_gesture(hand_landmarks)
                     if current_gesture:
                         hand_label += f" - {current_gesture}"
 
-                    # Bounding box around hand
                     landmarks = hand_landmarks.landmark
                     x_coords = [lm.x * width for lm in landmarks]
                     y_coords = [lm.y * height for lm in landmarks]
@@ -503,7 +568,6 @@ class AdvancedGestureController(GestureController):
                         1
                     )
 
-            # Back to RGB
             if len(frame.shape) == 3 and frame.shape[2] == 3:
                 return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             else:
@@ -570,7 +634,7 @@ class AdvancedGestureController(GestureController):
             return None
 
     def execute_gesture_command(self, gesture):
-        """Execute command based on detected gesture (affects LOCAL state only)"""
+        """Execute command based on detected gesture"""
         try:
             if gesture == "thumbs_up":
                 current_mic_state = self.main_window.client.microphone_enabled
@@ -587,8 +651,15 @@ class AdvancedGestureController(GestureController):
             print(f"[GESTURE] Command execution error: {e}")
 
 
-def integrate_gesture_control(main_window):
-    """Helper to integrate gesture control with the main window"""
+def integrate_gesture_control(main_window, control_transmission=False):
+    """
+    Helper to integrate gesture control with the main window
+    
+    Args:
+        main_window: MainWindow instance
+        control_transmission: If True, control actual camera transmission.
+                            If False, only affect local preview (default)
+    """
     try:
         import mediapipe  # noqa: F401
     except ImportError:
@@ -602,5 +673,5 @@ def integrate_gesture_control(main_window):
         return None
 
     # Use Advanced controller (face + hands)
-    gesture_controller = AdvancedGestureController(main_window)
+    gesture_controller = AdvancedGestureController(main_window, control_transmission)
     return gesture_controller

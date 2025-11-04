@@ -1316,68 +1316,117 @@ class MainWindow(QMainWindow):
     #         self.chat_widget.gesture_button.setText("Gesture Control")
     #         self.chat_widget.gesture_button.button_type = "warning"
     #         self.chat_widget.gesture_button.init_style()
-    def toggle_gesture_control(self):
-        """Handle gesture control button click"""
-        from PyQt6.QtCore import QTimer
-        from PyQt6.QtWidgets import QMessageBox
+    # Replace the toggle_gesture_control method in MainWindow class with this:
 
-        # If controller doesn't exist -> create and (delayed) start it
+    def toggle_gesture_control(self):
+        """Handle gesture control button click with proper mode selection"""
+        from PyQt6.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QLabel, QRadioButton, QDialogButtonBox
+        
+        # If controller doesn't exist -> create and start it
         if not hasattr(self, 'gesture_controller') or self.gesture_controller is None:
             try:
+                # Show mode selection dialog
+                dialog = QDialog(self)
+                dialog.setWindowTitle("Gesture Control Mode")
+                dialog.setFixedSize(400, 200)
+                
+                layout = QVBoxLayout()
+                
+                label = QLabel("Choose gesture control mode:")
+                label.setStyleSheet(f"font-size: 14px; color: {COLORS['text']};")
+                layout.addWidget(label)
+                
+                preview_mode = QRadioButton("Preview Only (local display changes only)")
+                preview_mode.setChecked(True)  # Default
+                preview_mode.setStyleSheet(f"font-size: 13px; color: {COLORS['text']};")
+                
+                camera_mode = QRadioButton("Camera Control (affects transmission to all clients)")
+                camera_mode.setStyleSheet(f"font-size: 13px; color: {COLORS['text']};")
+                
+                layout.addWidget(preview_mode)
+                layout.addWidget(camera_mode)
+                
+                button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                button_box.accepted.connect(dialog.accept)
+                button_box.rejected.connect(dialog.reject)
+                layout.addWidget(button_box)
+                
+                dialog.setLayout(layout)
+                dialog.setStyleSheet(f"""
+                    QDialog {{
+                        background-color: {COLORS['surface']};
+                    }}
+                    QRadioButton::indicator {{
+                        width: 16px;
+                        height: 16px;
+                    }}
+                """)
+                
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+                
+                control_transmission = camera_mode.isChecked()
+                
                 from gesture_control import integrate_gesture_control
-                self.gesture_controller = integrate_gesture_control(self)
+                self.gesture_controller = integrate_gesture_control(self, control_transmission)
                 if self.gesture_controller is None:
-                    return  # MediaPipe/TFLite not available or integration failed
+                    return  # MediaPipe not available
 
                 # Connect gesture controller to camera for overlay drawing
                 if self.client and getattr(self.client, "camera", None):
                     self.client.camera.set_gesture_controller(self.gesture_controller)
 
-                # Provide immediate UI feedback
+                # Update UI immediately
                 try:
                     self.chat_widget.gesture_button.setText("Starting...")
                     self.chat_widget.gesture_button.init_style()
                 except Exception:
-                    # Non-fatal if the button update fails
                     pass
 
-                # Delayed start to avoid contention with network threads and heavy native init
+                # Start the controller
+                from PyQt6.QtCore import QTimer
                 def _start_controller():
                     try:
                         self.gesture_controller.start()
-                        # Only update UI to "Stop" if start succeeded
+                        # Update UI to show it's running
                         try:
-                            self.chat_widget.gesture_button.setText("Stop Gesture Control")
+                            mode_text = "Camera Control" if control_transmission else "Preview Only"
+                            self.chat_widget.gesture_button.setText(f"Stop Gesture ({mode_text})")
                             self.chat_widget.gesture_button.button_type = "danger"
                             self.chat_widget.gesture_button.init_style()
                         except Exception:
                             pass
                     except Exception as e:
-                        # If starting fails, cleanup and notify user
                         try:
                             QMessageBox.critical(self, "Error", f"Failed to start gesture control: {str(e)}")
                         except Exception:
                             print(f"Failed to start gesture control: {e}")
 
-                        # Disconnect controller from camera and remove reference
+                        # Cleanup on failure
                         try:
                             if self.client and getattr(self.client, "camera", None):
                                 self.client.camera.set_gesture_controller(None)
                         except Exception:
                             pass
-
                         self.gesture_controller = None
+                        
+                        try:
+                            self.chat_widget.gesture_button.setText("Gesture Control")
+                            self.chat_widget.gesture_button.button_type = "warning"
+                            self.chat_widget.gesture_button.init_style()
+                        except Exception:
+                            pass
 
-                # Small delay (150 ms) to give network/media threads time to settle
-                QTimer.singleShot(150, _start_controller)
+                # Delayed start (200ms) to avoid blocking UI
+                QTimer.singleShot(200, _start_controller)
 
             except Exception as e:
-                # Initialization/integration error
                 try:
                     QMessageBox.critical(self, "Error", f"Failed to start gesture control: {str(e)}")
                 except Exception:
                     print(f"Failed to start gesture control: {e}")
-                # Ensure no leftover partial state
+                
+                # Cleanup
                 try:
                     if getattr(self, "gesture_controller", None):
                         if self.client and getattr(self.client, "camera", None):
@@ -1389,24 +1438,19 @@ class MainWindow(QMainWindow):
         else:
             # Stop gesture control
             try:
-                # Call existing stop method
                 if hasattr(self.gesture_controller, "stop_gesture_control"):
                     self.gesture_controller.stop_gesture_control()
-                elif hasattr(self.gesture_controller, "stop"):
-                    # fallback
-                    self.gesture_controller.stop()
             except Exception as e:
                 print(f"Error while stopping gesture controller: {e}")
 
-            # Wait until thread definitely stopped (existing logic)
+            # Wait for thread to stop
             try:
                 if hasattr(self.gesture_controller, "isRunning") and self.gesture_controller.isRunning():
-                    # wait up to 3s
                     self.gesture_controller.wait(3000)
             except Exception:
                 pass
 
-            # Now it's safe to remove controller and clear camera reference
+            # Cleanup
             try:
                 if self.client and getattr(self.client, "camera", None):
                     self.client.camera.set_gesture_controller(None)
@@ -1422,7 +1466,6 @@ class MainWindow(QMainWindow):
                 self.chat_widget.gesture_button.init_style()
             except Exception:
                 pass
-
 
     def resizeEvent(self, event):
         """Handle window resize to update overlay position"""
