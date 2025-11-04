@@ -33,7 +33,7 @@ ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 90]  # Lower quality = smaller si
 # Audio - FIXED: Reduce audio block size
 ENABLE_AUDIO = True
 SAMPLE_RATE = 44100  # Reduced from 48000
-BLOCK_SIZE = 1024    # Reduced from 2048
+BLOCK_SIZE = 512    # Reduced from 2048
 
 import numpy as np
 
@@ -180,7 +180,7 @@ class Camera:
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
-        self.max_frame_size = 25000
+        self.max_frame_size = 28000
         
         try:
             self.cap = cv2.VideoCapture(2)
@@ -284,11 +284,7 @@ class Camera:
     def get_frame(self, apply_overlays=False):
         """
         Get camera frame
-        apply_overlays: If True, apply gesture detection overlays (for local display only)
-                    If False, return clean frame (for transmission to other clients)
-        
-        IMPORTANT: This method now captures a FRESH frame each time to avoid conflicts
-        between display and transmission.
+        FIXED: Provides frames to gesture controller instead of letting it read directly
         """
         if not self.camera_available or self.cap is None:
             return None
@@ -302,8 +298,11 @@ class Camera:
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # CRITICAL FIX: Always work with a copy to prevent cross-contamination
-            # between display (with overlays) and transmission (clean)
+            # CRITICAL FIX: Update gesture controller with this frame
+            if self.gesture_controller is not None and hasattr(self.gesture_controller, 'update_frame_for_detection'):
+                self.gesture_controller.update_frame_for_detection(frame)
+            
+            # Work on a copy for overlays to prevent contamination
             frame_copy = frame.copy()
             
             # Only apply overlays if explicitly requested (for local display)
@@ -312,10 +311,9 @@ class Camera:
                 self.gesture_controller.running):
                 frame_copy = self.gesture_controller.draw_detection_boxes(frame_copy)
             
-            # Encode the frame (with or without overlays based on apply_overlays flag)
+            # Encode the frame
             if ENABLE_ENCODE:
-                # Encode with adaptive quality to meet size limits
-                quality = 80  # Increased for better quality
+                quality = 80
                 for attempt in range(3):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
                     success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame_copy, cv2.COLOR_RGB2BGR), encode_param)
@@ -324,7 +322,6 @@ class Camera:
                         return encoded_frame
                     quality -= 15
                     
-                # If still too large, use low quality
                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
                 success, encoded_frame = cv2.imencode('.jpg', cv2.cvtColor(frame_copy, cv2.COLOR_RGB2BGR), encode_param)
                 return encoded_frame if success else None
@@ -374,11 +371,9 @@ class VideoControlButton(QPushButton):
             }}
             QPushButton:hover {{
                 background-color: {bg_hover};
-                transform: scale(1.05);
             }}
             QPushButton:pressed {{
                 background-color: {bg_hover};
-                transform: scale(0.95);
             }}
         """
         self.setStyleSheet(style)
@@ -568,7 +563,6 @@ class VideoWidget(QWidget):
             }}
             VideoWidget:hover {{
                 border-color: {COLORS['primary']};
-                box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15);
             }}
         """)
 

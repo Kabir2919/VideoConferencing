@@ -9,13 +9,11 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    Automatically turns camera on/off based on face presence.
-    Now includes visual feedback with bounding boxes.
+    FIXED: No longer reads frames directly, uses shared frame buffer instead.
     """
     
-    # Signals to communicate with main UI
-    camera_control_signal = pyqtSignal(bool)  # True = enable, False = disable
-    status_update_signal = pyqtSignal(str)    # Status messages
+    camera_control_signal = pyqtSignal(bool)
+    status_update_signal = pyqtSignal(str)
     
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -27,7 +25,7 @@ class GestureController(QThread):
         self.mp_face_detection = mp.solutions.face_detection
         self.mp_drawing = mp.solutions.drawing_utils
         self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=0,  # 0 for short-range (2m), 1 for long-range (5m)
+            model_selection=0,
             min_detection_confidence=0.5
         )
         
@@ -35,23 +33,26 @@ class GestureController(QThread):
         self.last_face_detected = False
         self.face_absent_counter = 0
         self.face_present_counter = 0
-        self.face_absent_threshold = 30  # frames without face before turning off camera
-        self.face_present_threshold = 10  # frames with face before turning on camera
+        self.face_absent_threshold = 30
+        self.face_present_threshold = 10
         
         # Visual feedback variables
         self.show_detection_boxes = True
         self.detection_results = None
+        
+        # CRITICAL FIX: Shared frame buffer for detection
+        self.last_detection_frame = None
+        self.frame_lock = threading.Lock()
         
         # Connect signals
         self.camera_control_signal.connect(self.control_camera)
         self.status_update_signal.connect(self.update_status)
     
     def run(self):
-        """Main thread loop for gesture control"""
+        """Main thread loop - FIXED: No longer reads camera directly"""
         self.running = True
         self.status_update_signal.emit("Gesture Control: Started - Face detection active")
         
-        # Get camera reference from the client
         camera = self.main_window.client.camera
         if not camera:
             self.status_update_signal.emit("Gesture Control: Error - No camera available")
@@ -59,14 +60,21 @@ class GestureController(QThread):
         
         while self.running:
             try:
-                # Get frame from camera
-                ret, frame = camera.cap.read()
-                if not ret:
-                    time.sleep(0.1)
-                    continue
+                # CRITICAL FIX: Get frame from shared buffer instead of reading camera
+                with self.frame_lock:
+                    if self.last_detection_frame is None:
+                        time.sleep(0.05)
+                        continue
+                    
+                    # Work on a copy to avoid threading issues
+                    frame = self.last_detection_frame.copy()
                 
-                # Convert BGR to RGB for MediaPipe
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Convert BGR to RGB for MediaPipe (if needed)
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    # Assume it's RGB from camera, convert to RGB for MediaPipe
+                    rgb_frame = frame  # Already RGB from get_frame()
+                else:
+                    rgb_frame = frame
                 
                 # Process frame for face detection
                 results = self.face_detection.process(rgb_frame)
@@ -91,6 +99,14 @@ class GestureController(QThread):
                 time.sleep(1)
         
         self.status_update_signal.emit("Gesture Control: Stopped")
+    
+    def update_frame_for_detection(self, frame):
+        """
+        Update the frame buffer for gesture detection
+        Called by Camera.get_frame() to provide frames
+        """
+        with self.frame_lock:
+            self.last_detection_frame = frame.copy()
     
     def draw_detection_boxes(self, frame):
         """Draw detection boxes and landmarks on the frame"""
@@ -274,14 +290,11 @@ class GestureController(QThread):
 
 
 class AdvancedGestureController(GestureController):
-    """
-    Extended gesture controller with hand gestures for additional controls
-    """
+    """Extended gesture controller with hand gestures"""
     
     def __init__(self, main_window, parent=None):
         super().__init__(main_window, parent)
         
-        # MediaPipe Hands setup for additional gesture recognition
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -290,14 +303,13 @@ class AdvancedGestureController(GestureController):
             min_tracking_confidence=0.5
         )
         
-        # Hand gesture states
         self.last_gesture = None
         self.gesture_counter = 0
-        self.gesture_threshold = 5  # frames with same gesture before action
+        self.gesture_threshold = 5
         self.hand_results = None
     
     def run(self):
-        """Enhanced run method with hand gesture detection"""
+        """FIXED: Enhanced run method - no direct camera reading"""
         self.running = True
         self.status_update_signal.emit("Advanced Gesture Control: Started - Face + Hand detection active")
         
@@ -308,24 +320,26 @@ class AdvancedGestureController(GestureController):
         
         while self.running:
             try:
-                ret, frame = camera.cap.read()
-                if not ret:
-                    time.sleep(0.1)
-                    continue
+                # CRITICAL FIX: Get frame from shared buffer
+                with self.frame_lock:
+                    if self.last_detection_frame is None:
+                        time.sleep(0.05)
+                        continue
+                    
+                    frame = self.last_detection_frame.copy()
                 
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb_frame = frame  # Already RGB from get_frame()
                 
-                # Face detection (existing functionality)
+                # Face detection
                 face_results = self.face_detection.process(rgb_frame)
                 face_detected = face_results.detections is not None and len(face_results.detections) > 0
                 
-                # Store results for drawing
                 self.detection_results = face_results
                 
                 self.update_face_counters(face_detected)
                 self.handle_camera_control(face_detected)
                 
-                # Hand gesture detection (new functionality)
+                # Hand gesture detection
                 hand_results = self.hands.process(rgb_frame)
                 self.hand_results = hand_results
                 

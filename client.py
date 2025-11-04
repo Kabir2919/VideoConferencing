@@ -11,8 +11,8 @@ from qt_gui import MainWindow, Camera, Microphone, Worker
 
 from constants import *
 
-# IP = socket.gethostbyname(socket.gethostname())
-IP = "172.20.10.5"  # Uncomment and set manually if needed
+IP = socket.gethostbyname(socket.gethostname())
+# IP = "172.20.10.4"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
