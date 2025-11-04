@@ -125,12 +125,15 @@ class GestureController(QThread):
         Called by Camera.get_frame() to provide frames for detection.
         LOCAL ONLY - doesn't affect transmission.
         """
-        # Only update if initialized to avoid processing before ready
-        if not self.initialized:
-            return
-            
-        with self.frame_lock:
-            self.last_detection_frame = frame.copy()
+        # Accept frames even if not fully initialized — they’ll be used once ready
+        # This prevents frame starvation during startup and avoids startup lag.
+        try:
+            with self.frame_lock:
+                self.last_detection_frame = frame.copy()
+        except Exception as e:
+            # Failsafe: log but don’t crash if frame is invalid or lock fails
+            print(f"[GestureControl] Warning: failed to update frame for detection: {e}")
+
 
     def draw_detection_boxes(self, frame):
         """
