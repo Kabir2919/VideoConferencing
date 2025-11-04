@@ -559,10 +559,17 @@ class VideoWidget(QWidget):
                 
                 if frame is None:
                     frame = NOCAM_FRAME.copy()
-                elif ENABLE_ENCODE:
-                    # Decode the encoded frame
-                    frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif ENABLE_ENCODE and isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and len(frame.shape) == 1:
+                    # This is an encoded frame (1D array of bytes)
+                    try:
+                        frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        else:
+                            frame = NOCAM_FRAME.copy()
+                    except Exception as e:
+                        print(f"[VIDEO] Decode error: {e}")
+                        frame = NOCAM_FRAME.copy()
                 
                 # Apply gesture overlays ONLY if camera is enabled
                 camera = self.client.camera
@@ -579,29 +586,56 @@ class VideoWidget(QWidget):
                     frame = NOCAM_FRAME.copy()
         else:
             # REMOTE CLIENT
-            frame = self.client.get_video()
+            frame = self.client.video_frame  # Get the stored frame
             
             if frame is None:
+                # No frame available - camera is off
                 frame = NOCAM_FRAME.copy()
-            elif ENABLE_ENCODE:
-                frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            elif isinstance(frame, bytes) and frame == CAMERA_OFF_MARKER:
+                # Explicit camera off marker
+                frame = NOCAM_FRAME.copy()
+            elif ENABLE_ENCODE and isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and len(frame.shape) == 1:
+                # This is an encoded frame - decode it
+                try:
+                    decoded = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                    if decoded is not None:
+                        frame = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+                    else:
+                        print(f"[VIDEO] Failed to decode frame from {self.client.name}")
+                        frame = NOCAM_FRAME.copy()
+                except Exception as e:
+                    print(f"[VIDEO] Decode error for {self.client.name}: {e}")
+                    frame = NOCAM_FRAME.copy()
+            elif not isinstance(frame, np.ndarray):
+                # Invalid frame type
+                print(f"[VIDEO] Invalid frame type from {self.client.name}: {type(frame)}")
+                frame = NOCAM_FRAME.copy()
         
         # Resize to display size
-        frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+        try:
+            frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+        except Exception as e:
+            print(f"[VIDEO] Resize error: {e}")
+            frame = NOCAM_FRAME.copy()
+            frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
         
         # Add microphone indicator if no audio
         if self.client.audio_data is None:
-            nomic_h, nomic_w, _ = NOMIC_FRAME.shape
-            x, y = FRAME_WIDTH//2 - nomic_w//2, FRAME_HEIGHT - 50
-            frame[y:y+nomic_h, x:x+nomic_w] = NOMIC_FRAME.copy()
+            try:
+                nomic_h, nomic_w, _ = NOMIC_FRAME.shape
+                x, y = FRAME_WIDTH//2 - nomic_w//2, FRAME_HEIGHT - 50
+                frame[y:y+nomic_h, x:x+nomic_w] = NOMIC_FRAME.copy()
+            except Exception as e:
+                print(f"[VIDEO] Mic indicator error: {e}")
 
         # Display the frame
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        self.video_viewer.setPixmap(QPixmap.fromImage(q_img))
-
+        try:
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            self.video_viewer.setPixmap(QPixmap.fromImage(q_img))
+        except Exception as e:
+            print(f"[VIDEO] Display error: {e}")
 
 class VideoListWidget(QListWidget):
     def __init__(self, parent=None):

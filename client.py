@@ -42,19 +42,25 @@ class Client:
     def get_video(self):
         """Get video frame for transmission or display"""
         if not self.camera_enabled:
-            # Send camera off marker instead of None
+            # Camera is disabled - send marker
             self.video_frame = CAMERA_OFF_MARKER
             return CAMERA_OFF_MARKER
 
         if self.camera is not None:
-            self.video_frame = self.camera.get_frame(apply_overlays=False)
+            frame = self.camera.get_frame(apply_overlays=False)
             
             # If camera returns None (hardware issue), send camera off marker
-            if self.video_frame is None:
+            if frame is None:
                 self.video_frame = CAMERA_OFF_MARKER
                 return CAMERA_OFF_MARKER
-
-        return self.video_frame
+            
+            # Valid frame received
+            self.video_frame = frame
+            return frame
+        else:
+            # No camera available
+            self.video_frame = CAMERA_OFF_MARKER
+            return CAMERA_OFF_MARKER
     
     def get_audio(self):
         if not self.microphone_enabled:
@@ -395,9 +401,15 @@ class ServerConnection(QThread):
                 
             if msg.data_type == VIDEO:
                 # Check if this is a camera off marker
-                if msg.data == CAMERA_OFF_MARKER:
+                if isinstance(msg.data, bytes) and msg.data == CAMERA_OFF_MARKER:
                     all_clients[client_name].video_frame = None
+                    print(f"[{self.name}] [{client_name}] Camera OFF marker received")
+                elif msg.data is None:
+                    # Explicit None means camera off
+                    all_clients[client_name].video_frame = None
+                    print(f"[{self.name}] [{client_name}] Video frame is None")
                 else:
+                    # Valid video data
                     all_clients[client_name].video_frame = msg.data
                     
             elif msg.data_type == AUDIO:
