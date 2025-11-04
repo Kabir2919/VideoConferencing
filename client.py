@@ -12,7 +12,7 @@ from qt_gui import MainWindow, Camera, Microphone, Worker
 from constants import *
 
 IP = socket.gethostbyname(socket.gethostname())
-IP = "172.20.10.4"  # Uncomment and set manually if needed
+# IP = "172.20.10.5"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
@@ -195,27 +195,54 @@ class ServerConnection(QThread):
             self.video_socket.close()
             self.audio_socket.close()
     
+    # def send_msg(self, conn: socket.socket, msg: Message):
+    #     if not self.connected and msg.request != ADD:
+    #         return
+            
+    #     try:
+    #         msg_bytes = pickle.dumps(msg)
+            
+    #         # FIXED: Check packet size before sending
+    #         if msg.data_type in [VIDEO, AUDIO]:
+    #             max_size = MEDIA_SIZE[msg.data_type]
+    #             if len(msg_bytes) > max_size:
+    #                 # print(f"[ERROR] {msg.data_type} packet too large: {len(msg_bytes)} > {max_size}")
+    #                 return
+    #             conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
+    #         else:
+    #             conn.send_bytes(msg_bytes)
+                
+    #     except (BrokenPipeError, ConnectionResetError, OSError, socket.error) as e:
+    #         print(f"[ERROR] Send failed: {e}")
+    #         if self.connected:  # Only set to False if we were previously connected
+    #             self.connected = False
     def send_msg(self, conn: socket.socket, msg: Message):
         if not self.connected and msg.request != ADD:
             return
             
         try:
             msg_bytes = pickle.dumps(msg)
-            
-            # FIXED: Check packet size before sending
+
             if msg.data_type in [VIDEO, AUDIO]:
                 max_size = MEDIA_SIZE[msg.data_type]
                 if len(msg_bytes) > max_size:
-                    # print(f"[ERROR] {msg.data_type} packet too large: {len(msg_bytes)} > {max_size}")
                     return
                 conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
+
             else:
                 conn.send_bytes(msg_bytes)
-                
-        except (BrokenPipeError, ConnectionResetError, OSError, socket.error) as e:
+
+        except Exception as e:
             print(f"[ERROR] Send failed: {e}")
-            if self.connected:  # Only set to False if we were previously connected
-                self.connected = False
+
+            # DO NOT set self.connected = False for UDP!
+            try:
+                # Only TCP errors should disconnect
+                if conn.type != socket.SOCK_DGRAM:
+                    self.connected = False
+            except:
+                pass
+
     
     def send_file(self, filepath: str, to_names: tuple[str]):
         filename = os.path.basename(filepath)
@@ -303,8 +330,9 @@ class ServerConnection(QThread):
                     msg_bytes = conn.recv_bytes()
                     
                 if not msg_bytes:
+                    time.sleep(0.01)
                     print(f"[{media}] Empty message received, connection may be closed")
-                    break
+                    continue
                     
                 try:
                     msg = pickle.loads(msg_bytes)
@@ -331,8 +359,10 @@ class ServerConnection(QThread):
                 consecutive_errors += 1
                 print(f"[{self.name}] [{media}] [ERROR] {e}")
                 if consecutive_errors >= max_errors:
-                    print(f"[{media}] Too many consecutive errors, stopping handler")
-                    break
+                    print(f"[WARN] too many errors → pausing + retrying")
+                    consecutive_errors = 0
+                    time.sleep(0.25)
+
                 time.sleep(0.1)
         
         print(f"[{media}] Handler thread exiting")
