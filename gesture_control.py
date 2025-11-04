@@ -9,212 +9,259 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    FIXED: Uses shared frame buffer - completely local processing
+    LOCAL ONLY: Never interferes with network transmission.
+    FIXED: Asynchronous initialization to prevent blocking
     """
-    
-    camera_control_signal = pyqtSignal(bool)
+
     status_update_signal = pyqtSignal(str)
-    
+    initialization_complete_signal = pyqtSignal(bool)
+
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
         self.running = False
+        self.initialized = False
         self.face_detection_enabled = True
-        
-        # MediaPipe setup
-        self.mp_face_detection = mp.solutions.face_detection
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=0,
-            min_detection_confidence=0.5
-        )
-        
-        # Camera control variables
+
+        # MediaPipe setup - will be initialized in background
+        self.mp_face_detection = None
+        self.mp_drawing = None
+        self.face_detection = None
+
+        # Face-state counters
         self.last_face_detected = False
         self.face_absent_counter = 0
         self.face_present_counter = 0
         self.face_absent_threshold = 30
         self.face_present_threshold = 10
-        
-        # Visual feedback variables (LOCAL DISPLAY ONLY)
+
+        # Visual feedback (LOCAL preview only)
         self.show_detection_boxes = True
         self.detection_results = None
-        
+
         # Shared frame buffer for detection (separate from transmission)
         self.last_detection_frame = None
         self.frame_lock = threading.Lock()
-        
-        # Connect signals
-        self.camera_control_signal.connect(self.control_camera)
+
+        # Local preview hide flag (does NOT affect transmission)
+        self.local_hide_camera = False
+
+        # Connect status signal
         self.status_update_signal.connect(self.update_status)
-    
+        self.initialization_complete_signal.connect(self.on_initialization_complete)
+
     def run(self):
-        """Main thread loop - processes frames from shared buffer"""
+        """Main thread loop with async initialization"""
         self.running = True
-        self.status_update_signal.emit("Gesture Control: Started - Face detection active")
-        
+        self.status_update_signal.emit("Gesture Control: Initializing...")
+
         camera = self.main_window.client.camera
         if not camera:
             self.status_update_signal.emit("Gesture Control: Error - No camera available")
             return
-        
-        while self.running:
+
+        # Initialize MediaPipe in background (non-blocking)
+        try:
+            self.status_update_signal.emit("Gesture Control: Loading MediaPipe models...")
+            self.mp_face_detection = mp.solutions.face_detection
+            self.mp_drawing = mp.solutions.drawing_utils
+            
+            # This is the blocking part - do it in the worker thread
+            self.face_detection = self.mp_face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=0.5
+            )
+            
+            self.initialized = True
+            self.initialization_complete_signal.emit(True)
+            self.status_update_signal.emit("Gesture Control: Started - Face detection active")
+            
+        except Exception as e:
+            self.initialized = False
+            self.initialization_complete_signal.emit(False)
+            self.status_update_signal.emit(f"Gesture Control: Initialization failed - {str(e)}")
+            return
+
+        # Main processing loop - only runs after successful initialization
+        while self.running and self.initialized:
             try:
                 # Get frame from shared buffer
                 with self.frame_lock:
                     if self.last_detection_frame is None:
                         time.sleep(0.05)
                         continue
-                    
-                    # Work on a copy to avoid threading issues
                     frame = self.last_detection_frame.copy()
-                
-                # Convert to RGB if needed (MediaPipe expects RGB)
-                if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    rgb_frame = frame  # Already RGB from camera
-                else:
-                    rgb_frame = frame
-                
-                # Process frame for face detection
+
+                # MediaPipe expects RGB
+                rgb_frame = frame
+
+                # Face detection
                 results = self.face_detection.process(rgb_frame)
-                
-                # Store detection results for LOCAL drawing only
                 self.detection_results = results
-                
-                # Check if face is detected
+
+                # Face present?
                 face_detected = results.detections is not None and len(results.detections) > 0
-                
-                # Update face detection counters
+
+                # Update counters & apply local-only behavior
                 self.update_face_counters(face_detected)
-                
-                # Control camera based on face detection (LOCAL STATE ONLY)
-                self.handle_camera_control(face_detected)
-                
-                # Small delay to prevent excessive CPU usage
-                time.sleep(0.1)
-                
+                self.handle_local_hide(face_detected)
+
+                time.sleep(0.1)  # limit CPU usage
+
             except Exception as e:
                 self.status_update_signal.emit(f"Gesture Control: Error - {str(e)}")
                 time.sleep(1)
-        
+
         self.status_update_signal.emit("Gesture Control: Stopped")
-    
+
+    def on_initialization_complete(self, success):
+        """Called when initialization completes"""
+        if not success:
+            self.running = False
+
     def update_frame_for_detection(self, frame):
         """
-        Update the frame buffer for gesture detection
-        Called by Camera.get_frame() to provide frames for detection
-        This is LOCAL ONLY - doesn't affect transmission
+        Update the frame buffer for gesture detection.
+        Called by Camera.get_frame() to provide frames for detection.
+        LOCAL ONLY - doesn't affect transmission.
         """
+        # Only update if initialized to avoid processing before ready
+        if not self.initialized:
+            return
+            
         with self.frame_lock:
             self.last_detection_frame = frame.copy()
-    
+
     def draw_detection_boxes(self, frame):
         """
-        Draw detection boxes on frame for LOCAL DISPLAY ONLY
-        This is NEVER transmitted to other clients
+        Draw detection boxes on frame for LOCAL DISPLAY ONLY.
+        This is NEVER transmitted to other clients.
         """
+        # Don't draw if not initialized yet
+        if not self.initialized:
+            return frame
+            
+        # Local preview hidden → draw placeholder
+        if self.local_hide_camera:
+            blank = np.zeros_like(frame)
+            text = "Face not detected - local preview hidden"
+            try:
+                (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                x = max(10, (blank.shape[1] - tw) // 2)
+                y = max(40, (blank.shape[0] // 2))
+                cv2.putText(blank, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            except:
+                pass  # Silently fail if text rendering has issues
+            return blank
+
         if not self.show_detection_boxes or self.detection_results is None:
             return frame
-        
-        # Work on a copy
+
         display_frame = frame.copy()
-        
+
         # Convert to BGR for OpenCV drawing
-        if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
-            frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-        else:
-            frame_bgr = display_frame.copy()
-        
+        try:
+            if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
+                frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+            else:
+                frame_bgr = display_frame.copy()
+        except Exception as e:
+            print(f"[GESTURE] Color conversion error: {e}")
+            return frame
+
         height, width = frame_bgr.shape[:2]
-        
+
         # Draw face detection boxes
         if self.detection_results.detections:
             for detection in self.detection_results.detections:
-                # Get bounding box
-                bbox = detection.location_data.relative_bounding_box
-                
-                # Convert normalized coordinates to pixel coordinates
-                x = int(bbox.xmin * width)
-                y = int(bbox.ymin * height)
-                w = int(bbox.width * width)
-                h = int(bbox.height * height)
-                
-                # Draw bounding box
-                color = (0, 255, 0)  # Green for face detection
-                thickness = 2
-                cv2.rectangle(frame_bgr, (x, y), (x + w, y + h), color, thickness)
-                
-                # Draw confidence score
-                confidence = detection.score[0] if detection.score else 0
-                label = f"Face: {confidence:.2f}"
-                
-                # Calculate text size for background
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
-                )
-                
-                # Draw text background
-                cv2.rectangle(
-                    frame_bgr, 
-                    (x, y - text_height - baseline - 5), 
-                    (x + text_width, y), 
-                    color, 
-                    -1
-                )
-                
-                # Draw text
-                cv2.putText(
-                    frame_bgr, 
-                    label, 
-                    (x, y - baseline - 2), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.6, 
-                    (255, 255, 255), 
-                    1
-                )
-                
-                # Draw key facial landmarks if available
-                if hasattr(detection, 'location_data') and hasattr(detection.location_data, 'relative_keypoints'):
-                    for keypoint in detection.location_data.relative_keypoints:
-                        kp_x = int(keypoint.x * width)
-                        kp_y = int(keypoint.y * height)
-                        cv2.circle(frame_bgr, (kp_x, kp_y), 3, (255, 0, 0), -1)
-        
-        # Add status text
-        status_text = f"Faces: {len(self.detection_results.detections) if self.detection_results.detections else 0}"
-        camera_status = "ON" if self.main_window.client.camera_enabled else "OFF"
-        status_text += f" | Camera: {camera_status}"
-        
-        # Draw status background
-        (text_width, text_height), baseline = cv2.getTextSize(
-            status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
-        )
-        
-        cv2.rectangle(
-            frame_bgr, 
-            (10, 10), 
-            (20 + text_width, 20 + text_height + baseline), 
-            (0, 0, 0), 
-            -1
-        )
-        
-        # Draw status text
-        cv2.putText(
-            frame_bgr, 
-            status_text, 
-            (15, 15 + text_height), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            0.7, 
-            (255, 255, 255), 
-            2
-        )
-        
-        # Convert back to RGB
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        else:
-            return frame_bgr
-    
+                try:
+                    # Bounding box (normalized → pixels)
+                    bbox = detection.location_data.relative_bounding_box
+                    x = int(bbox.xmin * width)
+                    y = int(bbox.ymin * height)
+                    w = int(bbox.width * width)
+                    h = int(bbox.height * height)
+
+                    # Clamp to frame
+                    x = max(0, x); y = max(0, y)
+                    w = max(1, min(w, width - x))
+                    h = max(1, min(h, height - y))
+
+                    # Box + label
+                    cv2.rectangle(frame_bgr, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    confidence = detection.score[0] if detection.score else 0
+                    label = f"Face: {confidence:.2f}"
+
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
+                    )
+                    cv2.rectangle(
+                        frame_bgr,
+                        (x, y - text_height - baseline - 5),
+                        (x + text_width, y),
+                        (0, 255, 0),
+                        -1
+                    )
+                    cv2.putText(
+                        frame_bgr,
+                        label,
+                        (x, y - baseline - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        1
+                    )
+
+                    # Optional facial keypoints
+                    if (hasattr(detection, 'location_data')
+                            and hasattr(detection.location_data, 'relative_keypoints')
+                            and detection.location_data.relative_keypoints):
+                        for kp in detection.location_data.relative_keypoints:
+                            kp_x = int(kp.x * width)
+                            kp_y = int(kp.y * height)
+                            cv2.circle(frame_bgr, (kp_x, kp_y), 3, (255, 0, 0), -1)
+                except Exception as e:
+                    print(f"[GESTURE] Drawing error: {e}")
+                    continue
+
+        # Status text
+        try:
+            status_text = f"Faces: {len(self.detection_results.detections) if self.detection_results.detections else 0}"
+            camera_status = "ON" if self.main_window.client.camera_enabled else "OFF"
+            status_text += f" | Camera: {camera_status}"
+
+            (text_width, text_height), baseline = cv2.getTextSize(
+                status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+            )
+            cv2.rectangle(
+                frame_bgr,
+                (10, 10),
+                (20 + text_width, 20 + text_height + baseline),
+                (0, 0, 0),
+                -1
+            )
+            cv2.putText(
+                frame_bgr,
+                status_text,
+                (15, 15 + text_height),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+        except Exception as e:
+            print(f"[GESTURE] Status text error: {e}")
+
+        # Back to RGB for Qt
+        try:
+            if len(frame.shape) == 3 and frame.shape[2] == 3:
+                return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                return frame_bgr
+        except Exception as e:
+            print(f"[GESTURE] Final conversion error: {e}")
+            return frame
+
     def update_face_counters(self, face_detected):
         """Update counters for face detection stability"""
         if face_detected:
@@ -223,307 +270,334 @@ class GestureController(QThread):
         else:
             self.face_absent_counter += 1
             self.face_present_counter = 0
-    
-    def handle_camera_control(self, face_detected):
+
+    def handle_local_hide(self, face_detected):
         """
-        Handle camera on/off based on face detection
-        This only affects LOCAL state - transmitted automatically
+        Option B: Only hide/show LOCAL preview based on face presence.
+        Never toggles camera transmission.
         """
-        current_camera_state = self.main_window.client.camera_enabled
-        
-        # Turn off camera if no face detected for threshold frames
-        if (not face_detected and 
-            self.face_absent_counter >= self.face_absent_threshold and 
-            current_camera_state):
-            
-            self.camera_control_signal.emit(False)
-            self.status_update_signal.emit("Gesture Control: No face detected - Camera turned OFF")
-        
-        # Turn on camera if face detected for threshold frames
-        elif (face_detected and 
-              self.face_present_counter >= self.face_present_threshold and 
-              not current_camera_state):
-            
-            self.camera_control_signal.emit(True)
-            self.status_update_signal.emit("Gesture Control: Face detected - Camera turned ON")
-    
-    def control_camera(self, enable):
-        """Control LOCAL camera state - changes are transmitted automatically"""
-        if enable != self.main_window.client.camera_enabled:
-            self.main_window.toggle_camera()
-    
+        # Hide local preview after sustained absence
+        if (not face_detected
+                and self.face_absent_counter >= self.face_absent_threshold
+                and not self.local_hide_camera):
+            self.local_hide_camera = True
+            self.status_update_signal.emit("Gesture: Face lost → local preview hidden")
+
+        # Restore local preview after sustained presence
+        if (face_detected
+                and self.face_present_counter >= self.face_present_threshold
+                and self.local_hide_camera):
+            self.local_hide_camera = False
+            self.status_update_signal.emit("Gesture: Face detected → local preview restored")
+
     def update_status(self, message):
         """Update status in chat widget"""
-        self.main_window.chat_widget.add_msg("System", "You", message)
-    
+        try:
+            self.main_window.chat_widget.add_msg("System", "You", message)
+        except Exception as e:
+            print(f"[GESTURE] Status update error: {e}")
+
     def stop_gesture_control(self):
         """Stop the gesture control thread"""
         self.running = False
         if self.isRunning():
             self.wait(3000)
-    
+
     def toggle_detection_boxes(self, show=None):
         """Toggle visibility of detection boxes (LOCAL DISPLAY ONLY)"""
         if show is None:
             self.show_detection_boxes = not self.show_detection_boxes
         else:
             self.show_detection_boxes = show
-        
+
         status = "enabled" if self.show_detection_boxes else "disabled"
-        self.status_update_signal.emit(f"Gesture Control: Detection boxes {status}")
-    
+        self.status_update_signal.emit(f"Gesture: Detection boxes {status}")
+
     def set_face_detection_sensitivity(self, sensitivity):
         """Adjust face detection sensitivity"""
-        self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=0,
-            min_detection_confidence=sensitivity
-        )
-        self.status_update_signal.emit(f"Gesture Control: Sensitivity set to {sensitivity}")
-    
+        if not self.initialized:
+            return
+        try:
+            self.face_detection = self.mp_face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=sensitivity
+            )
+            self.status_update_signal.emit(f"Gesture: Sensitivity set to {sensitivity}")
+        except Exception as e:
+            self.status_update_signal.emit(f"Gesture: Failed to set sensitivity - {str(e)}")
+
     def set_thresholds(self, absent_threshold=30, present_threshold=10):
-        """Set custom thresholds for camera control"""
+        """Set custom thresholds for local preview behavior"""
         self.face_absent_threshold = absent_threshold
         self.face_present_threshold = present_threshold
         self.status_update_signal.emit(
-            f"Gesture Control: Thresholds updated - "
-            f"Absent: {absent_threshold}, Present: {present_threshold}"
+            f"Gesture: Thresholds updated - Absent: {absent_threshold}, Present: {present_threshold}"
         )
 
 
 class AdvancedGestureController(GestureController):
     """Extended gesture controller with hand gestures - ALL LOCAL"""
-    
+
     def __init__(self, main_window, parent=None):
         super().__init__(main_window, parent)
-        
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        
+
+        self.mp_hands = None
+        self.hands = None
+
         self.last_gesture = None
         self.gesture_counter = 0
         self.gesture_threshold = 5
         self.hand_results = None
-    
+
     def run(self):
         """Enhanced run method with hand detection - ALL LOCAL"""
         self.running = True
-        self.status_update_signal.emit("Advanced Gesture Control: Started - Face + Hand detection active")
-        
+        self.status_update_signal.emit("Advanced Gesture Control: Initializing...")
+
         camera = self.main_window.client.camera
         if not camera:
             self.status_update_signal.emit("Gesture Control: Error - No camera available")
             return
-        
-        while self.running:
+
+        # Initialize MediaPipe in background (non-blocking)
+        try:
+            self.status_update_signal.emit("Advanced Gesture Control: Loading models...")
+            
+            # Face detection
+            self.mp_face_detection = mp.solutions.face_detection
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.face_detection = self.mp_face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=0.5
+            )
+            
+            # Hand detection
+            self.mp_hands = mp.solutions.hands
+            self.hands = self.mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            
+            self.initialized = True
+            self.initialization_complete_signal.emit(True)
+            self.status_update_signal.emit("Advanced Gesture Control: Started - Face + Hand detection active")
+            
+        except Exception as e:
+            self.initialized = False
+            self.initialization_complete_signal.emit(False)
+            self.status_update_signal.emit(f"Advanced Gesture Control: Initialization failed - {str(e)}")
+            return
+
+        while self.running and self.initialized:
             try:
-                # Get frame from shared buffer
                 with self.frame_lock:
                     if self.last_detection_frame is None:
                         time.sleep(0.05)
                         continue
-                    
                     frame = self.last_detection_frame.copy()
-                
+
                 rgb_frame = frame
-                
+
                 # Face detection
                 face_results = self.face_detection.process(rgb_frame)
                 face_detected = face_results.detections is not None and len(face_results.detections) > 0
-                
+
                 self.detection_results = face_results
-                
+
                 self.update_face_counters(face_detected)
-                self.handle_camera_control(face_detected)
-                
+                self.handle_local_hide(face_detected)
+
                 # Hand gesture detection (LOCAL ONLY)
                 hand_results = self.hands.process(rgb_frame)
                 self.hand_results = hand_results
-                
+
                 if hand_results.multi_hand_landmarks:
                     self.process_hand_gestures(hand_results.multi_hand_landmarks)
-                
+
                 time.sleep(0.1)
-                
+
             except Exception as e:
                 self.status_update_signal.emit(f"Advanced Gesture Control: Error - {str(e)}")
                 time.sleep(1)
-        
+
         self.status_update_signal.emit("Advanced Gesture Control: Stopped")
-    
+
     def draw_detection_boxes(self, frame):
         """Enhanced drawing with hand landmarks - LOCAL DISPLAY ONLY"""
-        # First draw face detection boxes
+        if not self.initialized:
+            return frame
+            
+        # Respect local preview hide first (super handles this & face boxes)
         frame = super().draw_detection_boxes(frame)
-        
+        if self.local_hide_camera:
+            return frame
+
         if not self.show_detection_boxes or self.hand_results is None:
             return frame
-        
-        # Work on a copy
+
         display_frame = frame.copy()
-        
-        # Convert to BGR for OpenCV
-        if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
-            frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-        else:
-            frame_bgr = display_frame.copy()
-        
-        height, width = frame_bgr.shape[:2]
-        
-        # Draw hand landmarks
-        if self.hand_results.multi_hand_landmarks:
-            for hand_idx, hand_landmarks in enumerate(self.hand_results.multi_hand_landmarks):
-                # Draw hand skeleton
-                self.mp_drawing.draw_landmarks(
-                    frame_bgr, 
-                    hand_landmarks, 
-                    self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_drawing.DrawingSpec(color=(255, 0, 255), thickness=2, circle_radius=2),
-                    self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
-                )
-                
-                # Get hand classification
-                hand_label = "Hand"
-                if self.hand_results.multi_handedness:
-                    if hand_idx < len(self.hand_results.multi_handedness):
+
+        try:
+            # Convert to BGR for drawing
+            if len(display_frame.shape) == 3 and display_frame.shape[2] == 3:
+                frame_bgr = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+            else:
+                frame_bgr = display_frame.copy()
+
+            height, width = frame_bgr.shape[:2]
+
+            # Draw hand landmarks
+            if self.hand_results.multi_hand_landmarks:
+                for hand_idx, hand_landmarks in enumerate(self.hand_results.multi_hand_landmarks):
+                    self.mp_drawing.draw_landmarks(
+                        frame_bgr,
+                        hand_landmarks,
+                        self.mp_hands.HAND_CONNECTIONS,
+                        self.mp_drawing.DrawingSpec(color=(255, 0, 255), thickness=2, circle_radius=2),
+                        self.mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=2)
+                    )
+
+                    # Hand classification
+                    hand_label = "Hand"
+                    if self.hand_results.multi_handedness and hand_idx < len(self.hand_results.multi_handedness):
                         hand_label = self.hand_results.multi_handedness[hand_idx].classification[0].label
-                
-                # Detect current gesture
-                current_gesture = self.detect_gesture(hand_landmarks)
-                if current_gesture:
-                    hand_label += f" - {current_gesture}"
-                
-                # Get hand bounding box
-                landmarks = hand_landmarks.landmark
-                x_coords = [lm.x * width for lm in landmarks]
-                y_coords = [lm.y * height for lm in landmarks]
-                
-                x_min, x_max = int(min(x_coords) - 20), int(max(x_coords) + 20)
-                y_min, y_max = int(min(y_coords) - 20), int(max(y_coords) + 20)
-                
-                # Draw bounding box
-                cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), (255, 0, 255), 2)
-                
-                # Draw hand label
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    hand_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
-                )
-                
-                cv2.rectangle(
-                    frame_bgr, 
-                    (x_min, y_min - text_height - baseline - 5), 
-                    (x_min + text_width, y_min), 
-                    (255, 0, 255), 
-                    -1
-                )
-                
-                cv2.putText(
-                    frame_bgr, 
-                    hand_label, 
-                    (x_min, y_min - baseline - 2), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.6, 
-                    (255, 255, 255), 
-                    1
-                )
-        
-        # Convert back to RGB
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        else:
-            return frame_bgr
-    
+
+                    # Current gesture
+                    current_gesture = self.detect_gesture(hand_landmarks)
+                    if current_gesture:
+                        hand_label += f" - {current_gesture}"
+
+                    # Bounding box around hand
+                    landmarks = hand_landmarks.landmark
+                    x_coords = [lm.x * width for lm in landmarks]
+                    y_coords = [lm.y * height for lm in landmarks]
+                    x_min, x_max = int(min(x_coords) - 20), int(max(x_coords) + 20)
+                    y_min, y_max = int(min(y_coords) - 20), int(max(y_coords) + 20)
+                    x_min = max(0, x_min); y_min = max(0, y_min)
+                    x_max = min(width - 1, x_max); y_max = min(height - 1, y_max)
+
+                    cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), (255, 0, 255), 2)
+
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        hand_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
+                    )
+                    cv2.rectangle(
+                        frame_bgr,
+                        (x_min, y_min - text_height - baseline - 5),
+                        (x_min + text_width, y_min),
+                        (255, 0, 255),
+                        -1
+                    )
+                    cv2.putText(
+                        frame_bgr,
+                        hand_label,
+                        (x_min, y_min - baseline - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        1
+                    )
+
+            # Back to RGB
+            if len(frame.shape) == 3 and frame.shape[2] == 3:
+                return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                return frame_bgr
+        except Exception as e:
+            print(f"[GESTURE] Hand drawing error: {e}")
+            return frame
+
     def process_hand_gestures(self, hand_landmarks_list):
         """Process hand gestures for additional LOCAL controls"""
         for hand_landmarks in hand_landmarks_list:
             gesture = self.detect_gesture(hand_landmarks)
-            
+
             if gesture == self.last_gesture:
                 self.gesture_counter += 1
             else:
                 self.gesture_counter = 0
                 self.last_gesture = gesture
-            
-            # Execute gesture command if stable (affects LOCAL state only)
+
             if self.gesture_counter >= self.gesture_threshold:
                 self.execute_gesture_command(gesture)
                 self.gesture_counter = 0
-    
+
     def detect_gesture(self, hand_landmarks):
         """Simple gesture detection based on landmark positions"""
-        landmarks = hand_landmarks.landmark
-        
-        # Get key landmark positions
-        thumb_tip = landmarks[self.mp_hands.HandLandmark.THUMB_TIP]
-        thumb_ip = landmarks[self.mp_hands.HandLandmark.THUMB_IP]
-        index_tip = landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
-        index_pip = landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_PIP]
-        middle_tip = landmarks[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-        middle_pip = landmarks[self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP]
-        
-        # Thumbs up gesture (microphone control)
-        if (thumb_tip.y < thumb_ip.y and 
-            index_tip.y > index_pip.y and 
-            middle_tip.y > middle_pip.y):
-            return "thumbs_up"
-        
-        # Peace sign
-        if (index_tip.y < index_pip.y and 
-            middle_tip.y < middle_pip.y and 
-            thumb_tip.y > thumb_ip.y):
-            return "peace_sign"
-        
-        # Open palm
-        fingers_extended = sum([
-            thumb_tip.y < thumb_ip.y,
-            index_tip.y < index_pip.y,
-            middle_tip.y < middle_pip.y,
-            landmarks[self.mp_hands.HandLandmark.RING_FINGER_TIP].y < 
-            landmarks[self.mp_hands.HandLandmark.RING_FINGER_PIP].y,
-            landmarks[self.mp_hands.HandLandmark.PINKY_TIP].y < 
-            landmarks[self.mp_hands.HandLandmark.PINKY_PIP].y
-        ])
-        
-        if fingers_extended >= 4:
-            return "open_palm"
-        
-        return None
-    
+        try:
+            landmarks = hand_landmarks.landmark
+
+            thumb_tip = landmarks[self.mp_hands.HandLandmark.THUMB_TIP]
+            thumb_ip = landmarks[self.mp_hands.HandLandmark.THUMB_IP]
+            index_tip = landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+            index_pip = landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_PIP]
+            middle_tip = landmarks[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+            middle_pip = landmarks[self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP]
+
+            # Thumbs up
+            if (thumb_tip.y < thumb_ip.y and
+                index_tip.y > index_pip.y and
+                middle_tip.y > middle_pip.y):
+                return "thumbs_up"
+
+            # Peace sign
+            if (index_tip.y < index_pip.y and
+                middle_tip.y < middle_pip.y and
+                thumb_tip.y > thumb_ip.y):
+                return "peace_sign"
+
+            # Open palm
+            fingers_extended = sum([
+                thumb_tip.y < thumb_ip.y,
+                index_tip.y < index_pip.y,
+                middle_tip.y < middle_pip.y,
+                landmarks[self.mp_hands.HandLandmark.RING_FINGER_TIP].y <
+                landmarks[self.mp_hands.HandLandmark.RING_FINGER_PIP].y,
+                landmarks[self.mp_hands.HandLandmark.PINKY_TIP].y <
+                landmarks[self.mp_hands.HandLandmark.PINKY_PIP].y
+            ])
+            if fingers_extended >= 4:
+                return "open_palm"
+
+            return None
+        except Exception as e:
+            print(f"[GESTURE] Gesture detection error: {e}")
+            return None
+
     def execute_gesture_command(self, gesture):
         """Execute command based on detected gesture (affects LOCAL state only)"""
-        if gesture == "thumbs_up":
-            # Toggle LOCAL microphone
-            current_mic_state = self.main_window.client.microphone_enabled
-            self.main_window.toggle_microphone()
-            status = "ON" if not current_mic_state else "OFF"
-            self.status_update_signal.emit(f"Gesture Control: Thumbs up detected - Microphone turned {status}")
-        
-        elif gesture == "peace_sign":
-            self.status_update_signal.emit("Gesture Control: Peace sign detected - Feature not implemented")
-        
-        elif gesture == "open_palm":
-            self.status_update_signal.emit("Gesture Control: Open palm detected - Wave hello!")
+        try:
+            if gesture == "thumbs_up":
+                current_mic_state = self.main_window.client.microphone_enabled
+                self.main_window.toggle_microphone()
+                status = "ON" if not current_mic_state else "OFF"
+                self.status_update_signal.emit(f"Gesture: Thumbs up → Microphone {status}")
+
+            elif gesture == "peace_sign":
+                self.status_update_signal.emit("Gesture: Peace sign → (reserved)")
+
+            elif gesture == "open_palm":
+                self.status_update_signal.emit("Gesture: Open palm → 👋")
+        except Exception as e:
+            print(f"[GESTURE] Command execution error: {e}")
 
 
 def integrate_gesture_control(main_window):
-    """Helper function to integrate gesture control with the main window"""
+    """Helper to integrate gesture control with the main window"""
     try:
-        import mediapipe
+        import mediapipe  # noqa: F401
     except ImportError:
         from PyQt6.QtWidgets import QMessageBox
         QMessageBox.warning(
-            main_window, 
-            "Missing Dependency", 
+            main_window,
+            "Missing Dependency",
             "MediaPipe library is required for gesture control.\n"
-            "Please install it using: pip install mediapipe"
+            "Install with: pip install mediapipe"
         )
         return None
-        
-    # Create gesture controller (use Advanced for hand gestures)
+
+    # Use Advanced controller (face + hands)
     gesture_controller = AdvancedGestureController(main_window)
-        
     return gesture_controller
