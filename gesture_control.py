@@ -1409,6 +1409,9 @@ class AdvancedGestureController(GestureController):
 
     # In gesture_control.py, replace the execute_gesture_command method in AdvancedGestureController:
 
+    # In gesture_control.py, replace the execute_gesture_command method:
+# The issue is with the emoji encoding - use plain text instead
+
     def execute_gesture_command(self, gesture):
         """Execute command based on detected gesture"""
         try:
@@ -1416,19 +1419,18 @@ class AdvancedGestureController(GestureController):
                 current_mic_state = self.main_window.client.microphone_enabled
                 self.main_window.toggle_microphone()
                 status = "ON" if not current_mic_state else "OFF"
-                self.status_update_signal.emit(f"Gesture: Thumbs up → Microphone {status}")
+                self.status_update_signal.emit(f"Gesture: Thumbs up -> Microphone {status}")
 
             elif gesture == "peace_sign":
                 current_camera_state = self.main_window.client.camera_enabled
                 self.main_window.toggle_camera()
                 status = "ON" if not current_camera_state else "OFF"
-                self.status_update_signal.emit(f"Gesture: Peace sign → Camera {status}")
+                self.status_update_signal.emit(f"Gesture: Peace sign -> Camera {status}")
 
             elif gesture == "open_palm":
                 try:
                     from constants import Message, POST, TEXT
                     
-                    # FIXED: Get recipients from server_conn's list, not all_clients
                     recipients = []
                     
                     # Get all clients from the video list widget
@@ -1437,6 +1439,7 @@ class AdvancedGestureController(GestureController):
                         for client_name in video_list.all_items.keys():
                             if client_name != self.main_window.client.name:
                                 recipients.append(client_name)
+                        print(f"[GESTURE] Found {len(recipients)} recipients from video_list")
                     except Exception as e:
                         print(f"[GESTURE] Error getting clients from video list: {e}")
                     
@@ -1447,11 +1450,13 @@ class AdvancedGestureController(GestureController):
                             for name in all_clients.keys():
                                 if name != self.main_window.client.name:
                                     recipients.append(name)
+                            print(f"[GESTURE] Found {len(recipients)} recipients from all_clients")
                         except Exception as e:
                             print(f"[GESTURE] Error getting all_clients: {e}")
                     
                     if len(recipients) > 0:
-                        hello_msg = "Hello 👋"
+                        # FIXED: Use plain text instead of emoji to avoid encoding issues
+                        hello_msg = "Hello! [Wave]"
                         msg = Message(
                             self.main_window.client.name, 
                             POST, 
@@ -1469,9 +1474,9 @@ class AdvancedGestureController(GestureController):
                             ", ".join(recipients), 
                             hello_msg
                         )
-                        self.status_update_signal.emit(f"Gesture: Open palm → Sent Hello 👋 to {len(recipients)} client(s)")
+                        self.status_update_signal.emit(f"Gesture: Open palm -> Sent Hello to {len(recipients)} client(s)")
                     else:
-                        self.status_update_signal.emit("Gesture: Open palm → No other clients connected")
+                        self.status_update_signal.emit("Gesture: Open palm -> No other clients connected")
                 except Exception as e:
                     print(f"[GESTURE] Error sending hello: {e}")
                     import traceback
@@ -1484,19 +1489,18 @@ class AdvancedGestureController(GestureController):
                         self.main_window.toggle_camera()
                     if self.main_window.client.microphone_enabled:
                         self.main_window.toggle_microphone()
-                    self.status_update_signal.emit("Gesture: Fist → Privacy Mode (Muted all)")
+                    self.status_update_signal.emit("Gesture: Fist -> Privacy Mode (Muted all)")
                 else:
                     if not self.main_window.client.camera_enabled:
                         self.main_window.toggle_camera()
                     if not self.main_window.client.microphone_enabled:
                         self.main_window.toggle_microphone()
-                    self.status_update_signal.emit("Gesture: Fist → Unmuted all")
+                    self.status_update_signal.emit("Gesture: Fist -> Unmuted all")
                     
             elif gesture == "pointing_up":
                 try:
                     from constants import Message, POST, TEXT
                     
-                    # FIXED: Get recipients from video list widget
                     recipients = []
                     try:
                         video_list = self.main_window.video_list_widget
@@ -1515,7 +1519,8 @@ class AdvancedGestureController(GestureController):
                             print(f"[GESTURE] Error with fallback: {e}")
                     
                     if len(recipients) > 0:
-                        attention_msg = "✋ [Raised Hand - Requesting Attention]"
+                        # FIXED: Use plain text instead of emoji
+                        attention_msg = "[Raised Hand - Requesting Attention]"
                         msg = Message(
                             self.main_window.client.name,
                             POST,
@@ -1528,9 +1533,9 @@ class AdvancedGestureController(GestureController):
                             msg
                         )
                         self.main_window.chat_widget.add_msg("You", ", ".join(recipients), attention_msg)
-                        self.status_update_signal.emit(f"Gesture: Pointing up → Raised hand to {len(recipients)} client(s)")
+                        self.status_update_signal.emit(f"Gesture: Pointing up -> Raised hand to {len(recipients)} client(s)")
                     else:
-                        self.status_update_signal.emit("Gesture: Pointing up → No other clients connected")
+                        self.status_update_signal.emit("Gesture: Pointing up -> No other clients connected")
                 except Exception as e:
                     print(f"[GESTURE] Error raising hand: {e}")
                     import traceback
