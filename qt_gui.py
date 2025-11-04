@@ -958,11 +958,13 @@ class ChatWidget(QWidget):
         text = self.line_edit.text()
         self.line_edit.clear()
         return text
-    
+
     def add_msg(self, from_name: str, to_name: str, msg: str):
+        """Add message to chat with proper text colors"""
         formatted_msg = f"<div style='margin: 8px 0; padding: 8px; background-color: {COLORS['surface_hover']}; border-radius: 6px;'>"
         formatted_msg += f"<span style='font-weight: 600; color: {COLORS['primary']};'>{from_name}</span>"
         formatted_msg += f" <span style='color: {COLORS['text_muted']}; font-size: 12px;'>→ {to_name}</span><br>"
+        # FIXED: Use text color instead of white
         formatted_msg += f"<span style='color: {COLORS['text']};'>{msg}</span></div>"
         self.central_widget.insertHtml(formatted_msg)
         
