@@ -11,50 +11,11 @@ from qt_gui import MainWindow, Camera, Microphone, Worker
 
 from constants import *
 
-IP = socket.gethostbyname(socket.gethostname())
-# IP = "172.20.10.4"  # Uncomment and set manually if needed
+# IP = socket.gethostbyname(socket.gethostname())
+IP = "172.20.10.5"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
-
-# class Client:
-#     def __init__(self, name: str, current_device = False):
-#         self.name = name
-#         self.current_device = current_device
-
-#         self.video_frame = None
-#         self.audio_data = None
-
-#         if self.current_device:
-#             self.camera = Camera()
-#             self.microphone = Microphone()
-#         else:
-#             self.camera = None
-#             self.microphone = None
-        
-#         self.camera_enabled = True
-#         self.microphone_enabled = True
-
-#     def get_video(self):
-#         if not self.camera_enabled:
-#             self.video_frame = None
-#             return None
-
-#         if self.camera is not None:
-#             self.video_frame = self.camera.get_frame()
-
-#         return self.video_frame
-    
-#     def get_audio(self):
-#         if not self.microphone_enabled:
-#             self.audio_data = None
-#             return None
-
-#         if self.microphone is not None:
-#             self.audio_data = self.microphone.get_data()
-
-#         return self.audio_data
-# Key changes to Client class in client.py
 
 class Client:
     def __init__(self, name: str, current_device = False):
@@ -81,8 +42,6 @@ class Client:
             return None
 
         if self.camera is not None:
-            # CRITICAL: For transmission to server, get frame WITHOUT overlays
-            # Overlays are only for local display
             self.video_frame = self.camera.get_frame(apply_overlays=False)
 
         return self.video_frame
@@ -96,7 +55,6 @@ class Client:
             self.audio_data = self.microphone.get_data()
 
         return self.audio_data
-
 
 class ServerConnection(QThread):
     add_client_signal = pyqtSignal(Client)
@@ -115,7 +73,7 @@ class ServerConnection(QThread):
         self.recieving_filename = None
 
     def run(self):
-        if not self.init_conn():  # Connect to all servers and send name
+        if not self.init_conn(): 
             return
             
         self.start_conn_threads() # Start receiving threads for all servers
