@@ -9,13 +9,13 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    LOCAL ONLY: Never interferes with network transmission.
-    FIXED: Proper async init + Option to control camera transmission
+    FIXED: Proper signal handling and camera state control
     """
 
     status_update_signal = pyqtSignal(str)
     initialization_complete_signal = pyqtSignal(bool)
-    camera_control_signal = pyqtSignal(bool)  # NEW: Signal to control camera state
+    # FIXED: Use bool signal to directly set camera state
+    set_camera_state_signal = pyqtSignal(bool)
 
     def __init__(self, main_window, control_transmission=False, parent=None):
         super().__init__(parent)
@@ -24,7 +24,7 @@ class GestureController(QThread):
         self.initialized = False
         self.face_detection_enabled = True
         
-        # NEW: Control whether to affect camera transmission or just local preview
+        # Control whether to affect camera transmission or just local preview
         self.control_transmission = control_transmission
 
         # MediaPipe setup - will be initialized in background
@@ -47,16 +47,24 @@ class GestureController(QThread):
         self.last_detection_frame = None
         self.frame_lock = threading.Lock()
 
-        # Local preview hide flag (does NOT affect transmission by default)
+        # Local preview hide flag
         self.local_hide_camera = False
 
-        # Connect status signal
+        # Connect signals
         self.status_update_signal.connect(self.update_status)
         self.initialization_complete_signal.connect(self.on_initialization_complete)
         
-        # NEW: Connect camera control signal if controlling transmission
+        # FIXED: Connect camera control signal properly
         if self.control_transmission:
-            self.camera_control_signal.connect(self.main_window.toggle_camera)
+            self.set_camera_state_signal.connect(self._set_camera_state_slot)
+
+    def _set_camera_state_slot(self, state):
+        """Slot to handle camera state changes - runs in main thread"""
+        try:
+            self.main_window.client.camera_enabled = state
+            self.main_window.update_camera_ui_state()
+        except Exception as e:
+            print(f"[GESTURE] Error setting camera state: {e}")
 
     def run(self):
         """Main thread loop with async initialization"""
@@ -74,12 +82,11 @@ class GestureController(QThread):
             self.mp_face_detection = mp.solutions.face_detection
             self.mp_drawing = mp.solutions.drawing_utils
             
-            # This is the blocking part - do it in the worker thread
-            # Use lower priority thread to avoid blocking network operations
+            # Lower thread priority if possible
             import os
             if hasattr(os, 'nice'):
                 try:
-                    os.nice(5)  # Lower priority on Unix
+                    os.nice(5)
                 except:
                     pass
             
@@ -122,7 +129,7 @@ class GestureController(QThread):
                 # Update counters & apply behavior
                 self.update_face_counters(face_detected)
                 
-                # FIXED: Choose behavior based on control mode
+                # Choose behavior based on control mode
                 if self.control_transmission:
                     self.handle_camera_transmission(face_detected)
                 else:
@@ -293,7 +300,7 @@ class GestureController(QThread):
 
     def handle_camera_transmission(self, face_detected):
         """
-        NEW: Control actual camera transmission based on face presence.
+        Control actual camera transmission based on face presence.
         This will turn the camera on/off for ALL clients.
         """
         current_camera_state = self.main_window.client.camera_enabled
@@ -302,19 +309,21 @@ class GestureController(QThread):
         if (not face_detected
                 and self.face_absent_counter >= self.face_absent_threshold
                 and current_camera_state):
-            self.camera_control_signal.emit(False)  # Turn camera OFF
+            # Emit signal to turn camera OFF
+            self.set_camera_state_signal.emit(False)
             self.status_update_signal.emit("Gesture: Face lost → Camera transmission OFF")
 
         # Turn on camera after sustained presence
         if (face_detected
                 and self.face_present_counter >= self.face_present_threshold
                 and not current_camera_state):
-            self.camera_control_signal.emit(True)  # Turn camera ON
+            # Emit signal to turn camera ON
+            self.set_camera_state_signal.emit(True)
             self.status_update_signal.emit("Gesture: Face detected → Camera transmission ON")
 
     def handle_local_hide(self, face_detected):
         """
-        Original: Only hide/show LOCAL preview based on face presence.
+        Only hide/show LOCAL preview based on face presence.
         Never toggles camera transmission.
         """
         # Hide local preview after sustained absence
@@ -341,8 +350,16 @@ class GestureController(QThread):
     def stop_gesture_control(self):
         """Stop the gesture control thread"""
         self.running = False
+        # Give it time to exit cleanly
         if self.isRunning():
             self.wait(3000)
+        
+        # Clean up signal connections
+        try:
+            if self.control_transmission:
+                self.set_camera_state_signal.disconnect()
+        except:
+            pass
 
     def toggle_detection_boxes(self, show=None):
         """Toggle visibility of detection boxes (LOCAL DISPLAY ONLY)"""
@@ -375,25 +392,9 @@ class GestureController(QThread):
             f"Gesture: Thresholds updated - Absent: {absent_threshold}, Present: {present_threshold}"
         )
 
-    def set_control_mode(self, control_transmission):
-        """Change control mode at runtime"""
-        old_mode = self.control_transmission
-        self.control_transmission = control_transmission
-        
-        if old_mode != control_transmission:
-            if control_transmission:
-                self.camera_control_signal.connect(self.main_window.toggle_camera)
-                self.status_update_signal.emit("Gesture: Switched to CAMERA CONTROL mode")
-            else:
-                try:
-                    self.camera_control_signal.disconnect(self.main_window.toggle_camera)
-                except:
-                    pass
-                self.status_update_signal.emit("Gesture: Switched to PREVIEW ONLY mode")
-
 
 class AdvancedGestureController(GestureController):
-    """Extended gesture controller with hand gestures - ALL LOCAL"""
+    """Extended gesture controller with hand gestures"""
 
     def __init__(self, main_window, control_transmission=False, parent=None):
         super().__init__(main_window, control_transmission, parent)
@@ -480,7 +481,7 @@ class AdvancedGestureController(GestureController):
                 else:
                     self.handle_local_hide(face_detected)
 
-                # Hand gesture detection (LOCAL ONLY)
+                # Hand gesture detection
                 hand_results = self.hands.process(rgb_frame)
                 self.hand_results = hand_results
 
@@ -495,9 +496,8 @@ class AdvancedGestureController(GestureController):
 
         self.status_update_signal.emit("Advanced Gesture Control: Stopped")
 
-    # ... (rest of the AdvancedGestureController methods remain the same)
     def draw_detection_boxes(self, frame):
-        """Enhanced drawing with hand landmarks - LOCAL DISPLAY ONLY"""
+        """Enhanced drawing with hand landmarks"""
         if not self.initialized:
             return frame
             
@@ -577,7 +577,7 @@ class AdvancedGestureController(GestureController):
             return frame
 
     def process_hand_gestures(self, hand_landmarks_list):
-        """Process hand gestures for additional LOCAL controls"""
+        """Process hand gestures"""
         for hand_landmarks in hand_landmarks_list:
             gesture = self.detect_gesture(hand_landmarks)
 
@@ -592,7 +592,7 @@ class AdvancedGestureController(GestureController):
                 self.gesture_counter = 0
 
     def detect_gesture(self, hand_landmarks):
-        """Simple gesture detection based on landmark positions"""
+        """Simple gesture detection"""
         try:
             landmarks = hand_landmarks.landmark
 
