@@ -509,21 +509,21 @@ class AdvancedGestureController(GestureController):
             self.status_update_signal.emit("Gesture Control: Open palm detected - Wave hello!")
 
 
-    def integrate_gesture_control(main_window):
-        """Helper function to integrate gesture control with the main window"""
-        try:
-            import mediapipe
-        except ImportError:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(
-                main_window, 
-                "Missing Dependency", 
-                "MediaPipe library is required for gesture control.\n"
-                "Please install it using: pip install mediapipe"
-            )
-            return None
+def integrate_gesture_control(main_window):
+    """Helper function to integrate gesture control with the main window"""
+    try:
+        import mediapipe
+    except ImportError:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            main_window, 
+            "Missing Dependency", 
+            "MediaPipe library is required for gesture control.\n"
+            "Please install it using: pip install mediapipe"
+        )
+        return None
         
-        # Create gesture controller (use Advanced for hand gestures)
-        gesture_controller = AdvancedGestureController(main_window)
+    # Create gesture controller (use Advanced for hand gestures)
+    gesture_controller = AdvancedGestureController(main_window)
         
-        return gesture_controller
+    return gesture_controller
