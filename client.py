@@ -12,7 +12,7 @@ from qt_gui import MainWindow, Camera, Microphone, Worker
 from constants import *
 
 IP = socket.gethostbyname(socket.gethostname())
-# IP = "172.20.10.5"  # Uncomment and set manually if needed
+IP = "192.168.33.55"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
@@ -185,15 +185,45 @@ class ServerConnection(QThread):
         self.threadpool.start(self.audio_broadcast_thread)
     
     def disconnect_server(self):
+        # Signal threads to stop first
         try:
-            if self.connected:
-                self.send_msg(self.main_socket, Message(self.name, DISCONNECT))
+            # Ensure no further sends will be attempted
+            self.connected = False
         except:
             pass
-        finally:
-            self.main_socket.close()
-            self.video_socket.close()
-            self.audio_socket.close()
+
+        # Give worker threads a brief chance to exit cleanly
+        time.sleep(0.2)
+
+        # Try to send graceful QUIT on main socket (if still open)
+        try:
+            if getattr(self, 'main_socket', None):
+                try:
+                    self.send_msg(self.main_socket, Message(self.name, DISCONNECT))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Close sockets last
+        try:
+            if getattr(self, 'main_socket', None):
+                self.main_socket.close()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, 'video_socket', None):
+                self.video_socket.close()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, 'audio_socket', None):
+                self.audio_socket.close()
+        except Exception:
+            pass
+
     
     # def send_msg(self, conn: socket.socket, msg: Message):
     #     if not self.connected and msg.request != ADD:
@@ -216,32 +246,40 @@ class ServerConnection(QThread):
     #         print(f"[ERROR] Send failed: {e}")
     #         if self.connected:  # Only set to False if we were previously connected
     #             self.connected = False
+    import errno
+
     def send_msg(self, conn: socket.socket, msg: Message):
         if not self.connected and msg.request != ADD:
             return
-            
         try:
             msg_bytes = pickle.dumps(msg)
-
             if msg.data_type in [VIDEO, AUDIO]:
                 max_size = MEDIA_SIZE[msg.data_type]
                 if len(msg_bytes) > max_size:
                     return
+                # sendto might raise OSError if socket closed
                 conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
-
             else:
                 conn.send_bytes(msg_bytes)
-
-        except Exception as e:
+        except OSError as e:
+            # Windows socket errors like [WinError 10038] show up as OSError with errno
+            if getattr(e, 'winerror', None) == 10038 or getattr(e, 'errno', None) in (errno.EBADF, errno.ENOTCONN):
+                # benign: attempted on closed socket, ignore for UDP
+                if getattr(conn, 'type', None) == socket.SOCK_DGRAM:
+                    return
+                # For TCP, trigger disconnect handling
+                self.connected = False
+                return
             print(f"[ERROR] Send failed: {e}")
-
-            # DO NOT set self.connected = False for UDP!
+            # fallback: only set connected False for TCP
             try:
-                # Only TCP errors should disconnect
                 if conn.type != socket.SOCK_DGRAM:
                     self.connected = False
             except:
                 pass
+        except Exception as e:
+            print(f"[ERROR] Send failed: {e}")
+
 
     
     def send_file(self, filepath: str, to_names: tuple[str]):
@@ -353,6 +391,13 @@ class ServerConnection(QThread):
             except socket.timeout:
                 continue  # Timeout is normal, just continue
             except (ConnectionResetError, OSError, socket.error) as e:
+                print(f"[{self.name}] [{media}] [ERROR] Connection error: {e}")
+                break
+            except OSError as e:
+                if getattr(e, 'winerror', None) == 10038 or getattr(e, 'errno', None) == errno.EBADF:
+                    # Socket no longer valid — stop this handler
+                    print(f"[{media}] Socket closed/error {e}; exiting handler.")
+                    break
                 print(f"[{self.name}] [{media}] [ERROR] Connection error: {e}")
                 break
             except Exception as e:

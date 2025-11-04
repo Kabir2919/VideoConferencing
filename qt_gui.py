@@ -1368,13 +1368,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start gesture control: {str(e)}")
         else:
             # Stop gesture control
-            self.gesture_controller.stop_gesture_control()
-            
-            # Disconnect from camera
+            # in qt_gui.py (toggle_gesture_control stop branch)
+            self.gesture_controller.stop_gesture_control()   # existing
+            # Wait until thread definitely stopped
+            if self.gesture_controller.isRunning():
+                self.gesture_controller.wait(3000)
+
+            # Now it's safe to remove controller
             if self.client.camera:
                 self.client.camera.set_gesture_controller(None)
-                
+
             self.gesture_controller = None
+
             self.chat_widget.gesture_button.setText("Gesture Control")
             self.chat_widget.gesture_button.button_type = "warning"
             self.chat_widget.gesture_button.init_style()
