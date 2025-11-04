@@ -417,15 +417,20 @@ class ServerConnection(QThread):
     #         self.connected = False
     def handle_conn(self, conn: socket.socket, media: str):
         """
-        Robust receive loop for a connection handler with improved logging.
+        Robust receive loop for a connection handler.
 
-        - media is one of TEXT, VIDEO, AUDIO (constants imported elsewhere).
-        - For VIDEO/AUDIO (UDP) we use recvfrom where available.
-        - For TEXT (TCP) we use recv / recv_bytes.
+        - TEXT (TCP): expects pickled Message objects and unpickles them.
+        - VIDEO/AUDIO (UDP): expects raw media bytes; do NOT unpickle.
         - UDP-specific benign errors (WinError 10038 / EBADF) will exit this handler
         without marking the entire client disconnected.
         - Only the TEXT handler sets self.connected = False when exiting.
         """
+        import errno
+        import socket
+        import time
+        import pickle
+        import traceback
+        from datetime import datetime
 
         def _ts():
             return datetime.now().isoformat(timespec="milliseconds")
@@ -461,35 +466,57 @@ class ServerConnection(QThread):
                     print(f"[{_ts()}] [{self.name}] [{media}] Received empty payload — treating as closed")
                     break
 
-                # Unpickle / decode message
-                try:
-                    msg = pickle.loads(msg_bytes)
-                except Exception as e:
-                    # don't treat unpickle error as fatal for the whole connection
-                    print(f"[{_ts()}] [{self.name}] [{media}] Failed to unpickle message: {e}")
-                    # optionally log traceback for debugging but continue
-                    print(traceback.format_exc())
-                    continue
+                # --- Distinguish handling between TEXT (pickled messages) and MEDIA (raw bytes) ---
+                if media == TEXT:
+                    # Expect pickled message object
+                    try:
+                        msg = pickle.loads(msg_bytes)
+                    except Exception as e:
+                        # Log and continue, don't crash the handler on bad/unexpected payload
+                        print(f"[{_ts()}] [{self.name}] [{media}] Failed to unpickle TEXT message: {e}")
+                        print(traceback.format_exc())
+                        continue
 
-                # Dispatch message to existing handler if present.
-                try:
-                    if hasattr(self, "process_msg"):
-                        self.process_msg(media, msg)
-                    elif hasattr(self, "handle_msg"):
-                        try:
-                            # handle_msg expects only the message object (self already bound)
-                            self.handle_msg(msg)
-                        except Exception as e:
-                            print(f"[{self.name}] [{media}] Error in handle_msg: {e}")
-                            import traceback; print(traceback.format_exc())
+                    # Dispatch pickled/text message to handlers
+                    try:
+                        if hasattr(self, "process_msg"):
+                            # process_msg usually expects (media, msg)
+                            self.process_msg(media, msg)
+                        elif hasattr(self, "handle_msg"):
+                            # many handle_msg implementations expect only (msg,)
+                            try:
+                                self.handle_msg(msg)
+                            except TypeError:
+                                # if handle_msg expects (media, msg), try that
+                                self.handle_msg(media, msg)
+                    except Exception as e:
+                        print(f"[{_ts()}] [{self.name}] [{media}] Error in message handler: {e}")
+                        print(traceback.format_exc())
 
-                    else:
-                        # Fallback: print received type (safe no-op)
-                        print(f"[{_ts()}] [{self.name}] [{media}] Received message of type: {type(msg)}")
-                except Exception as e:
-                    # Handler code failed for this message, but keep receiving
-                    print(f"[{_ts()}] [{self.name}] [{media}] Error in message handler: {e}")
-                    print(traceback.format_exc())
+                else:
+                    # VIDEO/AUDIO: raw media bytes — do NOT unpickle
+                    try:
+                        # Prefer a dedicated media handler if present
+                        if hasattr(self, "process_msg"):
+                            # process_msg(media, raw_bytes)
+                            self.process_msg(media, msg_bytes)
+                        elif hasattr(self, "handle_msg"):
+                            # try single-arg handle_msg(raw_bytes) first, then (media, raw_bytes)
+                            try:
+                                self.handle_msg(msg_bytes)
+                            except TypeError:
+                                try:
+                                    self.handle_msg(media, msg_bytes)
+                                except Exception as e:
+                                    # If handle_msg signature doesn't match, just log
+                                    print(f"[{_ts()}] [{self.name}] [{media}] handle_msg call failed: {e}")
+                                    print(traceback.format_exc())
+                        else:
+                            # Fallback: short log about raw packet
+                            print(f"[{_ts()}] [{self.name}] [{media}] Received media packet ({len(msg_bytes)} bytes)")
+                    except Exception as e:
+                        print(f"[{_ts()}] [{self.name}] [{media}] Error processing media packet: {e}")
+                        print(traceback.format_exc())
 
             except socket.timeout:
                 # Normal: non-blocking or timeout sockets -> continue listening
@@ -546,45 +573,44 @@ class ServerConnection(QThread):
 
         # Only the TEXT (main TCP) handler should mark the entire client disconnected
         if media == TEXT:
-            # Log the state change explicitly for easier debugging
             prior = getattr(self, "connected", None)
             self.connected = False
             print(f"[{_ts()}] [{self.name}] [{media}] Marking client disconnected (prior_connected={prior})")
 
 
-    def handle_msg(self, msg: Message):
-        global all_clients
-        client_name = msg.from_name
-        
-        if msg.request == POST:
-            if client_name not in all_clients:
-                print(f"[{self.name}] [ERROR] Invalid client name {client_name}: {msg}")
-                return
-                
-            if msg.data_type == VIDEO:
-                all_clients[client_name].video_frame = msg.data
-            elif msg.data_type == AUDIO:
-                all_clients[client_name].audio_data = msg.data
-            elif msg.data_type == TEXT:
-                self.add_msg_signal.emit(client_name, msg.data)
-            elif msg.data_type == FILE:
-                self.handle_file_message(msg, client_name)
-            else:
-                print(f"[{self.name}] [ERROR] Invalid data type {msg.data_type}")
-                
-        elif msg.request == ADD:
-            if client_name in all_clients:
-                print(f"[{self.name}] [ERROR] Client already exists with name {client_name}")
-                return
-            all_clients[client_name] = Client(client_name)
-            self.add_client_signal.emit(all_clients[client_name])
+        def handle_msg(self, msg: Message):
+            global all_clients
+            client_name = msg.from_name
             
-        elif msg.request == RM:
-            if client_name not in all_clients:
-                print(f"[{self.name}] [ERROR] Invalid client name {client_name}")
-                return
-            self.remove_client_signal.emit(client_name)
-            all_clients.pop(client_name)
+            if msg.request == POST:
+                if client_name not in all_clients:
+                    print(f"[{self.name}] [ERROR] Invalid client name {client_name}: {msg}")
+                    return
+                    
+                if msg.data_type == VIDEO:
+                    all_clients[client_name].video_frame = msg.data
+                elif msg.data_type == AUDIO:
+                    all_clients[client_name].audio_data = msg.data
+                elif msg.data_type == TEXT:
+                    self.add_msg_signal.emit(client_name, msg.data)
+                elif msg.data_type == FILE:
+                    self.handle_file_message(msg, client_name)
+                else:
+                    print(f"[{self.name}] [ERROR] Invalid data type {msg.data_type}")
+                    
+            elif msg.request == ADD:
+                if client_name in all_clients:
+                    print(f"[{self.name}] [ERROR] Client already exists with name {client_name}")
+                    return
+                all_clients[client_name] = Client(client_name)
+                self.add_client_signal.emit(all_clients[client_name])
+                
+            elif msg.request == RM:
+                if client_name not in all_clients:
+                    print(f"[{self.name}] [ERROR] Invalid client name {client_name}")
+                    return
+                self.remove_client_signal.emit(client_name)
+                all_clients.pop(client_name)
 
     def handle_file_message(self, msg, client_name):
         """Handle file transfer messages"""
