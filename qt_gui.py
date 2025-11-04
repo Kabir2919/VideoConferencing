@@ -33,7 +33,7 @@ ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 50]  # CHANGED: Lower quality for
 # Audio - CRITICAL FIX: Much smaller block size
 ENABLE_AUDIO = True
 SAMPLE_RATE = 44100
-BLOCK_SIZE = 256   # Reduced from 2048
+BLOCK_SIZE = 512   # Reduced from 2048
 
 import numpy as np
 

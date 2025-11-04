@@ -225,31 +225,6 @@ class ServerConnection(QThread):
         except Exception:
             pass
 
-    
-    # def send_msg(self, conn: socket.socket, msg: Message):
-    #     if not self.connected and msg.request != ADD:
-    #         return
-            
-    #     try:
-    #         msg_bytes = pickle.dumps(msg)
-            
-    #         # FIXED: Check packet size before sending
-    #         if msg.data_type in [VIDEO, AUDIO]:
-    #             max_size = MEDIA_SIZE[msg.data_type]
-    #             if len(msg_bytes) > max_size:
-    #                 # print(f"[ERROR] {msg.data_type} packet too large: {len(msg_bytes)} > {max_size}")
-    #                 return
-    #             conn.sendto(msg_bytes, (IP, VIDEO_PORT if msg.data_type == VIDEO else AUDIO_PORT))
-    #         else:
-    #             conn.send_bytes(msg_bytes)
-                
-    #     except (BrokenPipeError, ConnectionResetError, OSError, socket.error) as e:
-    #         print(f"[ERROR] Send failed: {e}")
-    #         if self.connected:  # Only set to False if we were previously connected
-    #             self.connected = False
-    # --- robust send_msg patch (client.py) ---
-    
-
     def send_msg(self, conn: socket.socket, msg: Message):
         if not self.connected and msg.request != ADD:
             return
@@ -268,7 +243,7 @@ class ServerConnection(QThread):
             errnum = getattr(e, 'errno', None)
             is_udp = getattr(conn, 'type', None) == socket.SOCK_DGRAM
 
-            # Benign: operation on closed UDP socket — just ignore
+            # Benign: operation on closed UDP socket – just ignore
             if is_udp and (winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN)):
                 return
 
@@ -281,8 +256,6 @@ class ServerConnection(QThread):
             print(f"[ERROR] Send failed: {e}")
         except Exception as e:
             print(f"[ERROR] Send failed: {e}")
-
-
     
     def send_file(self, filepath: str, to_names: tuple[str]):
         filename = os.path.basename(filepath)
@@ -362,260 +335,102 @@ class ServerConnection(QThread):
                     
                 time.sleep(0.1)
 
-
-    # def handle_conn(self, conn: socket.socket, media: str):
-    #     consecutive_errors = 0
-    #     max_errors = 10
-        
-    #     while self.connected:
-    #         try:
-    #             if media in [VIDEO, AUDIO]:
-    #                 msg_bytes, addr = conn.recvfrom(MEDIA_SIZE[media])
-    #             else:
-    #                 msg_bytes = conn.recv_bytes()
-                    
-    #             if not msg_bytes:
-    #                 time.sleep(0.01)
-    #                 print(f"[{media}] Empty message received, connection may be closed")
-    #                 continue
-                    
-    #             try:
-    #                 msg = pickle.loads(msg_bytes)
-    #             except pickle.UnpicklingError:
-    #                 print(f"[{self.name}] [{media}] [ERROR] UnpicklingError")
-    #                 consecutive_errors += 1
-    #                 if consecutive_errors >= max_errors:
-    #                     break
-    #                 continue
-
-    #             if msg.request == DISCONNECT:
-    #                 print(f"[{media}] Received disconnect message")
-    #                 break
-                    
-    #             self.handle_msg(msg)
-    #             consecutive_errors = 0  # Reset on successful message handling
-                
-    #         except socket.timeout:
-    #             continue  # Timeout is normal, just continue
-    #         except (ConnectionResetError, OSError, socket.error) as e:
-    #             print(f"[{self.name}] [{media}] [ERROR] Connection error: {e}")
-    #             break
-    #         except OSError as e:
-    #             if getattr(e, 'winerror', None) == 10038 or getattr(e, 'errno', None) == errno.EBADF:
-    #                 # Socket no longer valid — stop this handler
-    #                 print(f"[{media}] Socket closed/error {e}; exiting handler.")
-    #                 break
-    #             print(f"[{self.name}] [{media}] [ERROR] Connection error: {e}")
-    #             break
-    #         except Exception as e:
-    #             consecutive_errors += 1
-    #             print(f"[{self.name}] [{media}] [ERROR] {e}")
-    #             if consecutive_errors >= max_errors:
-    #                 print(f"[WARN] too many errors → pausing + retrying")
-    #                 consecutive_errors = 0
-    #                 time.sleep(0.25)
-
-    #             time.sleep(0.1)
-        
-    #     print(f"[{media}] Handler thread exiting")
-    #     if media == TEXT:  # Main connection handler
-    #         self.connected = False
     def handle_conn(self, conn: socket.socket, media: str):
-        """
-        Robust receive loop for a connection handler.
-
-        - TEXT (TCP): expects pickled Message objects and unpickles them.
-        - VIDEO/AUDIO (UDP): expects raw media bytes; do NOT unpickle.
-        - UDP-specific benign errors (WinError 10038 / EBADF) will exit this handler
-        without marking the entire client disconnected.
-        - Only the TEXT handler sets self.connected = False when exiting.
-        """
-        import errno
-        import socket
-        import time
-        import pickle
-        import traceback
-        from datetime import datetime
-
-        def _ts():
-            return datetime.now().isoformat(timespec="milliseconds")
-
+        """Handle connection for TEXT (TCP) or VIDEO/AUDIO (UDP)"""
         consecutive_errors = 0
-        max_errors = 5
-        exit_reason = "normal"
-
-        print(f"[{_ts()}] [{self.name}] [{media}] Handler started")
-
+        max_errors = 10
+        
+        print(f"[{self.name}] [{media}] Handler started")
+        
         while self.connected:
             try:
-                # --- receive raw bytes depending on media/socket type ---
-                if media in (VIDEO, AUDIO):
-                    # UDP-style - prefer recvfrom if available
-                    try:
-                        msg_bytes, addr = conn.recvfrom(MEDIA_SIZE[media])
-                    except AttributeError:
-                        # fallback for non-socket objects
-                        msg_bytes = conn.recv(MEDIA_SIZE[media])
+                if media in [VIDEO, AUDIO]:
+                    msg_bytes, addr = conn.recvfrom(MEDIA_SIZE[media])
                 else:
-                    # TEXT/TCP - prefer recv, fallback to recv_bytes
-                    try:
-                        msg_bytes = conn.recv(4096)
-                    except AttributeError:
-                        msg_bytes = conn.recv_bytes()
-
-                consecutive_errors = 0
-
-                # Empty payload -> peer closed
+                    msg_bytes = conn.recv_bytes()
+                    
                 if not msg_bytes:
-                    exit_reason = "peer_closed"
-                    print(f"[{_ts()}] [{self.name}] [{media}] Received empty payload — treating as closed")
-                    break
-
-                # --- Distinguish handling between TEXT (pickled messages) and MEDIA (raw bytes) ---
-                if media == TEXT:
-                    # Expect pickled message object
-                    try:
-                        msg = pickle.loads(msg_bytes)
-                    except Exception as e:
-                        # Log and continue, don't crash the handler on bad/unexpected payload
-                        print(f"[{_ts()}] [{self.name}] [{media}] Failed to unpickle TEXT message: {e}")
-                        print(traceback.format_exc())
-                        continue
-
-                    # Dispatch pickled/text message to handlers
-                    try:
-                        if hasattr(self, "process_msg"):
-                            # process_msg usually expects (media, msg)
-                            self.process_msg(media, msg)
-                        elif hasattr(self, "handle_msg"):
-                            # many handle_msg implementations expect only (msg,)
-                            try:
-                                self.handle_msg(msg)
-                            except TypeError:
-                                # if handle_msg expects (media, msg), try that
-                                self.handle_msg(media, msg)
-                    except Exception as e:
-                        print(f"[{_ts()}] [{self.name}] [{media}] Error in message handler: {e}")
-                        print(traceback.format_exc())
-
-                else:
-                    # VIDEO/AUDIO: raw media bytes — do NOT unpickle
-                    try:
-                        # Prefer a dedicated media handler if present
-                        if hasattr(self, "process_msg"):
-                            # process_msg(media, raw_bytes)
-                            self.process_msg(media, msg_bytes)
-                        elif hasattr(self, "handle_msg"):
-                            # try single-arg handle_msg(raw_bytes) first, then (media, raw_bytes)
-                            try:
-                                self.handle_msg(msg_bytes)
-                            except TypeError:
-                                try:
-                                    self.handle_msg(media, msg_bytes)
-                                except Exception as e:
-                                    # If handle_msg signature doesn't match, just log
-                                    print(f"[{_ts()}] [{self.name}] [{media}] handle_msg call failed: {e}")
-                                    print(traceback.format_exc())
-                        else:
-                            # Fallback: short log about raw packet
-                            print(f"[{_ts()}] [{self.name}] [{media}] Received media packet ({len(msg_bytes)} bytes)")
-                    except Exception as e:
-                        print(f"[{_ts()}] [{self.name}] [{media}] Error processing media packet: {e}")
-                        print(traceback.format_exc())
-
-            except socket.timeout:
-                # Normal: non-blocking or timeout sockets -> continue listening
-                continue
-
-            except (ConnectionResetError, BrokenPipeError) as e:
-                # These are generally fatal for this handler
-                exit_reason = "connection_reset_or_broken_pipe"
-                print(f"[{_ts()}] [{self.name}] [{media}] [ERROR] Connection error: {e}")
-                print(traceback.format_exc())
-                break
-
-            except OSError as e:
-                # Distinguish UDP benign errors (Windows 10038 / EBADF) from TCP fatal ones
-                winerr = getattr(e, "winerror", None)
-                errnum = getattr(e, "errno", None)
-
-                # Determine if this is a UDP socket (media-based or socket.type)
-                is_udp = media in (VIDEO, AUDIO)
+                    time.sleep(0.01)
+                    print(f"[{media}] Empty message received, connection may be closed")
+                    continue
+                    
                 try:
-                    conn_type = getattr(conn, "type", None)
-                    if conn_type == socket.SOCK_DGRAM:
-                        is_udp = True
-                except Exception:
-                    pass
+                    msg = pickle.loads(msg_bytes)
+                except pickle.UnpicklingError:
+                    print(f"[{self.name}] [{media}] [ERROR] UnpicklingError")
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_errors:
+                        break
+                    continue
 
-                # If it's the UDP handler and error is "invalid socket" / EBADF, treat it as handler-exit only
-                if is_udp and (winerr == 10038 or errnum == errno.EBADF):
-                    exit_reason = "udp_invalid_closed_benign"
-                    print(f"[{_ts()}] [{self.name}] [{media}] UDP socket invalid/closed (benign): {e} — exiting this handler only")
-                    print(traceback.format_exc())
+                if msg.request == DISCONNECT:
+                    print(f"[{media}] Received disconnect message")
                     break
-
-                # Otherwise log and exit handler (will be considered more serious)
-                exit_reason = "os_error"
-                print(f"[{_ts()}] [{self.name}] [{media}] [ERROR] Connection error: {e}")
-                print(traceback.format_exc())
+                    
+                self.handle_msg(msg)
+                consecutive_errors = 0  # Reset on successful message handling
+                
+            except socket.timeout:
+                continue  # Timeout is normal, just continue
+            except (ConnectionResetError, OSError, socket.error) as e:
+                winerr = getattr(e, 'winerror', None)
+                errnum = getattr(e, 'errno', None)
+                is_udp = media in [VIDEO, AUDIO]
+                
+                # Benign UDP socket errors
+                if is_udp and (winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN)):
+                    print(f"[{media}] Socket closed (benign); exiting handler.")
+                    break
+                    
+                print(f"[{self.name}] [{media}] [ERROR] Connection error: {e}")
                 break
-
             except Exception as e:
-                # Non-fatal, transient errors: throttle and retry
                 consecutive_errors += 1
-                exit_reason = "transient_unexpected"
-                print(f"[{_ts()}] [{self.name}] [{media}] [ERROR] Unexpected error: {e}")
-                print(traceback.format_exc())
+                print(f"[{self.name}] [{media}] [ERROR] {e}")
                 if consecutive_errors >= max_errors:
-                    print(f"[{_ts()}] [{self.name}] [{media}] Too many consecutive errors — brief pause before retrying")
+                    print(f"[WARN] too many errors → pausing + retrying")
                     consecutive_errors = 0
                     time.sleep(0.25)
                 time.sleep(0.1)
-
-        # End of receive loop
-        print(f"[{_ts()}] [{self.name}] [{media}] Handler thread exiting (reason={exit_reason})")
-
-        # Only the TEXT (main TCP) handler should mark the entire client disconnected
-        if media == TEXT:
-            prior = getattr(self, "connected", None)
+        
+        print(f"[{media}] Handler thread exiting")
+        if media == TEXT:  # Main connection handler
             self.connected = False
-            print(f"[{_ts()}] [{self.name}] [{media}] Marking client disconnected (prior_connected={prior})")
 
-
-        def handle_msg(self, msg: Message):
-            global all_clients
-            client_name = msg.from_name
-            
-            if msg.request == POST:
-                if client_name not in all_clients:
-                    print(f"[{self.name}] [ERROR] Invalid client name {client_name}: {msg}")
-                    return
-                    
-                if msg.data_type == VIDEO:
-                    all_clients[client_name].video_frame = msg.data
-                elif msg.data_type == AUDIO:
-                    all_clients[client_name].audio_data = msg.data
-                elif msg.data_type == TEXT:
-                    self.add_msg_signal.emit(client_name, msg.data)
-                elif msg.data_type == FILE:
-                    self.handle_file_message(msg, client_name)
-                else:
-                    print(f"[{self.name}] [ERROR] Invalid data type {msg.data_type}")
-                    
-            elif msg.request == ADD:
-                if client_name in all_clients:
-                    print(f"[{self.name}] [ERROR] Client already exists with name {client_name}")
-                    return
-                all_clients[client_name] = Client(client_name)
-                self.add_client_signal.emit(all_clients[client_name])
+    def handle_msg(self, msg: Message):
+        """Handle received message - FIXED INDENTATION"""
+        global all_clients
+        client_name = msg.from_name
+        
+        if msg.request == POST:
+            if client_name not in all_clients:
+                print(f"[{self.name}] [ERROR] Invalid client name {client_name}: {msg}")
+                return
                 
-            elif msg.request == RM:
-                if client_name not in all_clients:
-                    print(f"[{self.name}] [ERROR] Invalid client name {client_name}")
-                    return
-                self.remove_client_signal.emit(client_name)
-                all_clients.pop(client_name)
+            if msg.data_type == VIDEO:
+                all_clients[client_name].video_frame = msg.data
+            elif msg.data_type == AUDIO:
+                all_clients[client_name].audio_data = msg.data
+            elif msg.data_type == TEXT:
+                self.add_msg_signal.emit(client_name, msg.data)
+            elif msg.data_type == FILE:
+                self.handle_file_message(msg, client_name)
+            else:
+                print(f"[{self.name}] [ERROR] Invalid data type {msg.data_type}")
+                
+        elif msg.request == ADD:
+            if client_name in all_clients:
+                print(f"[{self.name}] [ERROR] Client already exists with name {client_name}")
+                return
+            all_clients[client_name] = Client(client_name)
+            self.add_client_signal.emit(all_clients[client_name])
+            
+        elif msg.request == RM:
+            if client_name not in all_clients:
+                print(f"[{self.name}] [ERROR] Invalid client name {client_name}")
+                return
+            self.remove_client_signal.emit(client_name)
+            all_clients.pop(client_name)
 
     def handle_file_message(self, msg, client_name):
         """Handle file transfer messages"""

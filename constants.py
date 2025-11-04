@@ -29,7 +29,7 @@ FILE = 'File'
 # Most networks have MTU of 1500 bytes, so UDP payload should be well under that
 MEDIA_SIZE = {
     VIDEO: 30000,   # ~29KB for encoded frame + overhead
-    AUDIO: 1500     # ~1.5KB for audio data + overhead
+    AUDIO: 5000     # ~1.5KB for audio data + overhead
 } # Much smaller, safer sizes
 
 
