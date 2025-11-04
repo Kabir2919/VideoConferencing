@@ -1,6 +1,8 @@
 import os
 import cv2
 import pyaudio
+import numpy as np
+import urllib.request
 from PyQt6.QtCore import Qt, QThread, QTimer, QSize, QRunnable, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap, QActionGroup, QIcon, QFont, QPalette, QColor
 from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, QDockWidget \
@@ -11,8 +13,8 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
 from constants import *
 
 # Camera
-CAMERA_RES = '240p'   # CHANGED: Much smaller to ensure packets fit
-LAYOUT_RES = '240p'   # Matching layout resolution
+CAMERA_RES = '240p'
+LAYOUT_RES = '240p'
 frame_size = {
     '240p': (352, 240),
     '360p': (480, 360),
@@ -26,64 +28,75 @@ frame_size = {
 FRAME_WIDTH = frame_size[CAMERA_RES][0]
 FRAME_HEIGHT = frame_size[CAMERA_RES][1]
 
-# Image Encoding - CRITICAL FIX: Much lower quality
+# Image Encoding
 ENABLE_ENCODE = True
-ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 50]  # CHANGED: Lower quality for smaller packets
+ENCODE_PARAM = [int(cv2.IMWRITE_JPEG_QUALITY), 50]
 
-# Audio - CRITICAL FIX: Much smaller block size
+# Audio
 ENABLE_AUDIO = True
 SAMPLE_RATE = 44100
-BLOCK_SIZE = 512   # Reduced from 2048
-
-import numpy as np
+BLOCK_SIZE = 512
 
 # Create default frames if image files don't exist
 def create_default_frame(width, height, text, color=(64, 64, 64)):
     """Create a default frame with text if image files are missing"""
     frame = np.full((height, width, 3), color, dtype=np.uint8)
     
-    # Add text to frame
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 1
     thickness = 2
     text_color = (255, 255, 255)
     
-    # Get text size
     (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
     
-    # Center the text
     x = (width - text_width) // 2
     y = (height + text_height) // 2
     
     cv2.putText(frame, text, (x, y), font, font_scale, text_color, thickness)
     return frame
 
-# Try to load images, create defaults if they don't exist
-try:
-    NOCAM_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nocam.jpeg")
-    if NOCAM_FRAME is None:
-        raise FileNotFoundError("nocam.jpeg not found")
-    
-    # Crop center part of the nocam frame
-    nocam_h, nocam_w = NOCAM_FRAME.shape[:2]
-    x, y = (nocam_w - FRAME_WIDTH)//2, (nocam_h - FRAME_HEIGHT)//2
-    NOCAM_FRAME = NOCAM_FRAME[y:y+FRAME_HEIGHT, x:x+FRAME_WIDTH]
-    
-except (FileNotFoundError, AttributeError):
-    print("[WARNING] nocam.jpeg not found, using default frame")
+
+def download_image_from_url(url, target_width, target_height):
+    """Download and process image from URL"""
+    try:
+        print(f"[INFO] Downloading image from: {url}")
+        
+        # Download image
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            img_array = np.asarray(bytearray(response.read()), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            raise Exception("Failed to decode image")
+        
+        # Convert to RGB
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Resize to target dimensions
+        img = cv2.resize(img, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        
+        print(f"[INFO] Successfully downloaded and processed image")
+        return img
+        
+    except Exception as e:
+        print(f"[WARNING] Failed to download image from URL: {e}")
+        return None
+
+
+# Try to download camera off image from URL
+NOCAM_IMAGE_URL = "https://www.shutterstock.com/image-vector/video-cam-off-icon-no-260nw-1750968803.jpg"
+NOCAM_FRAME = download_image_from_url(NOCAM_IMAGE_URL, FRAME_WIDTH, FRAME_HEIGHT)
+
+# Fallback to default frame if download fails
+if NOCAM_FRAME is None:
+    print("[WARNING] Using default 'Camera Off' frame")
     NOCAM_FRAME = create_default_frame(FRAME_WIDTH, FRAME_HEIGHT, "Camera Off")
 
-try:
-    NOMIC_FRAME = cv2.imread("C:/Users/Kabir/Desktop/Video/img/nomic.jpeg")
-    if NOMIC_FRAME is None:
-        raise FileNotFoundError("nomic.jpeg not found")
-except (FileNotFoundError, AttributeError):
-    print("[WARNING] nomic.jpeg not found, using default frame")
-    NOMIC_FRAME = create_default_frame(100, 50, "Mic Off", (128, 0, 0))
+# Microphone off image - using default
+NOMIC_FRAME = create_default_frame(100, 50, "Mic Off", (128, 0, 0))
+
 # Audio
-ENABLE_AUDIO = True
-SAMPLE_RATE = 48000
-BLOCK_SIZE = 2048
 pa = pyaudio.PyAudio()
 
 # Modern UI Color Scheme
@@ -110,7 +123,6 @@ COLORS = {
 class Worker(QRunnable):
     def __init__(self, fn, *args, **kwargs):
         super(Worker, self).__init__()
-        # Store constructor arguments (re-used for processing)
         self.fn = fn
         self.args = args
         self.kwargs = kwargs
@@ -150,6 +162,7 @@ class Microphone:
             print(f"[ERROR] Microphone data capture failed: {e}")
             return None
 
+
 class AudioThread(QThread):
     def __init__(self, client, parent=None):
         super().__init__(parent)
@@ -164,7 +177,6 @@ class AudioThread(QThread):
         self.connected = True
 
     def run(self):
-        # if this is the current client, then don't play audio
         if self.client.microphone is not None:
             return
         while self.connected:
@@ -175,23 +187,22 @@ class AudioThread(QThread):
         if data is not None:
             self.stream.write(data)
 
+
 class Camera:
     def __init__(self):
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
-        # CRITICAL: Target size must account for pickle overhead (~500 bytes)
-        self.max_frame_size = 28000  # Leave margin for pickle overhead
+        self.max_frame_size = 28000
         
         try:
-            self.cap = cv2.VideoCapture(0)  # Try default camera first
+            self.cap = cv2.VideoCapture(0)
             
             if self.cap.isOpened():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
                 self.cap.set(cv2.CAP_PROP_FPS, 30)
                 
-                # Enhanced color settings
                 self.cap.set(cv2.CAP_PROP_SATURATION, 128)
                 self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)
                 self.cap.set(cv2.CAP_PROP_CONTRAST, 128)
@@ -212,23 +223,18 @@ class Camera:
         self.gesture_controller = gesture_controller
     
     def get_frame(self, apply_overlays=False):
-        """
-        Get camera frame with AGGRESSIVE compression to meet packet size limits
-        """
+        """Get camera frame with AGGRESSIVE compression to meet packet size limits"""
         if not self.camera_available or self.cap is None:
             return None
 
         try:
-            # Read frame from camera
             ret, frame = self.cap.read()
             if not ret:
                 return None
 
-            # Resize to target resolution
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Send COPY to gesture controller if active (non-blocking)
             if (self.gesture_controller is not None
                 and hasattr(self.gesture_controller, 'update_frame_for_detection')
                 and self.gesture_controller.running):
@@ -237,12 +243,9 @@ class Camera:
                 except Exception as e:
                     print(f"[CAMERA] Gesture update error (non-fatal): {e}")
 
-            # Prepare transmission frame (ALWAYS CLEAN)
             tx_frame = frame.copy()
             
-            # AGGRESSIVE encoding to meet size limits
             if ENABLE_ENCODE:
-                # Start with very low quality
                 quality = 50
                 max_attempts = 5
                 
@@ -254,17 +257,13 @@ class Camera:
                         print(f"[CAMERA] Encoding failed at quality {quality}")
                         return None
                     
-                    # Check size INCLUDING pickle overhead estimate
-                    estimated_packet_size = len(encoded) + 500  # 500 bytes for pickle + Message overhead
+                    estimated_packet_size = len(encoded) + 500
                     
                     if estimated_packet_size <= self.max_frame_size:
-                        # Success! Packet will fit
                         return encoded
                     
-                    # Too large, reduce quality
                     quality = max(10, quality - 10)
                     if attempt == max_attempts - 1:
-                        # Last attempt - use minimum quality
                         print(f"[CAMERA] Warning: Using minimum quality to meet packet size")
                         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 10]
                         success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
@@ -351,15 +350,12 @@ class VideoControlsOverlay(QWidget):
             }}
         """)
         
-        # Make the overlay semi-transparent
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Layout for control buttons
         layout = QHBoxLayout()
         layout.setContentsMargins(15, 10, 15, 10)
         layout.setSpacing(20)
         
-        # Camera control button
         self.camera_btn = VideoControlButton(
             icon_text="📹", 
             button_type="camera", 
@@ -369,7 +365,6 @@ class VideoControlsOverlay(QWidget):
         self.camera_btn.setToolTip("Toggle Camera")
         self.camera_btn.clicked.connect(self.toggle_camera)
         
-        # Microphone control button
         self.mic_btn = VideoControlButton(
             icon_text="🎤", 
             button_type="microphone", 
@@ -379,7 +374,6 @@ class VideoControlsOverlay(QWidget):
         self.mic_btn.setToolTip("Toggle Microphone")
         self.mic_btn.clicked.connect(self.toggle_microphone)
         
-        # End call button
         self.end_call_btn = VideoControlButton(
             icon_text="📞", 
             button_type="danger", 
@@ -387,11 +381,10 @@ class VideoControlsOverlay(QWidget):
         )
         self.end_call_btn.setText("📞")
         self.end_call_btn.setToolTip("End Call")
-        self.end_call_btn.is_active = False  # Always red
+        self.end_call_btn.is_active = False
         self.end_call_btn.init_style()
         self.end_call_btn.clicked.connect(self.main_window.close)
         
-        # Settings/More button
         self.settings_btn = VideoControlButton(
             icon_text="⚙️", 
             button_type="secondary", 
@@ -408,7 +401,6 @@ class VideoControlsOverlay(QWidget):
         
         self.setLayout(layout)
         
-        # Make sure the overlay stays on top and is positioned correctly
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         
     def toggle_camera(self):
@@ -441,7 +433,6 @@ class VideoControlsOverlay(QWidget):
             }}
         """)
         
-        # Layout options
         layout_menu = menu.addMenu("Layout")
         layout_action_group = QActionGroup(self)
         
@@ -457,7 +448,6 @@ class VideoControlsOverlay(QWidget):
         
         menu.addSeparator()
         
-        # Gesture control toggle
         if hasattr(self.main_window, 'gesture_controller') and self.main_window.gesture_controller:
             gesture_action = menu.addAction("Stop Gesture Control")
             gesture_action.triggered.connect(self.main_window.toggle_gesture_control)
@@ -467,11 +457,9 @@ class VideoControlsOverlay(QWidget):
         
         menu.addSeparator()
         
-        # Show/Hide chat
         chat_action = menu.addAction("Toggle Chat Panel")
         chat_action.triggered.connect(self.toggle_chat_panel)
         
-        # Show menu at button position
         menu.exec(self.settings_btn.mapToGlobal(self.settings_btn.rect().bottomLeft()))
         
     def toggle_chat_panel(self):
@@ -487,7 +475,7 @@ class VideoControlsOverlay(QWidget):
         overlay_height = self.sizeHint().height()
         
         x = parent_geometry.center().x() - overlay_width // 2
-        y = parent_geometry.bottom() - overlay_height - 30  # 30px from bottom
+        y = parent_geometry.bottom() - overlay_height - 30
         
         self.move(x, y)
 
@@ -555,48 +543,52 @@ class VideoWidget(QWidget):
     
     def update_video(self):
         """
-        FIXED VIDEO DISPLAY PIPELINE:
-        
-        For LOCAL client (current device):
-        - Get frame (already encoded and clean)
-        - Decode it
-        - Apply gesture overlays ONLY for local display
-        - This overlay is NEVER transmitted
-        
-        For REMOTE clients:
-        - Get received frame (from network)
-        - Decode it
-        - Display as-is (no overlays)
+        FIXED: Proper handling of camera states and gesture control
+        - When camera is disabled via button: show NOCAM_FRAME
+        - When gesture control hides local preview: show NOCAM_FRAME
+        - Never show generic text overlay
         """
-        
-        # Get the frame
         if self.client.current_device:
-            # LOCAL: Get our own camera frame (clean, encoded)
-            frame = self.client.camera.get_frame(apply_overlays=False) if self.client.camera else None
+            # LOCAL CLIENT
+            # Check if camera is disabled
+            if not self.client.camera_enabled:
+                frame = NOCAM_FRAME.copy()
+            else:
+                # Camera is enabled, get frame
+                frame = self.client.camera.get_frame(apply_overlays=False) if self.client.camera else None
+                
+                if frame is None:
+                    frame = NOCAM_FRAME.copy()
+                elif ENABLE_ENCODE:
+                    # Decode the encoded frame
+                    frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Apply gesture overlays ONLY if camera is enabled
+                camera = self.client.camera
+                if (camera and camera.gesture_controller is not None
+                    and hasattr(camera.gesture_controller, 'draw_detection_boxes')
+                    and camera.gesture_controller.running
+                    and not camera.gesture_controller.local_hide_camera):  # Don't draw if locally hidden
+                    # Apply gesture detection boxes
+                    frame = camera.gesture_controller.draw_detection_boxes(frame)
+                elif (camera and camera.gesture_controller is not None
+                      and hasattr(camera.gesture_controller, 'local_hide_camera')
+                      and camera.gesture_controller.local_hide_camera):
+                    # Gesture control is hiding local preview - show camera off image
+                    frame = NOCAM_FRAME.copy()
         else:
-            # REMOTE: Get frame received from network (already clean)
+            # REMOTE CLIENT
             frame = self.client.get_video()
-        
-        # Handle no frame
-        if frame is None:
-            frame = NOCAM_FRAME.copy()
-        elif ENABLE_ENCODE:
-            # Decode the frame
-            frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            if frame is None:
+                frame = NOCAM_FRAME.copy()
+            elif ENABLE_ENCODE:
+                frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
         # Resize to display size
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
-        
-        # Apply gesture overlays ONLY for local display
-        if self.client.current_device:
-            # Check if gesture controller is active
-            camera = self.client.camera
-            if (camera and camera.gesture_controller is not None
-                and hasattr(camera.gesture_controller, 'draw_detection_boxes')
-                and camera.gesture_controller.running):
-                # Apply overlays to LOCAL display only
-                frame = camera.gesture_controller.draw_detection_boxes(frame)
         
         # Add microphone indicator if no audio
         if self.client.audio_data is None:
@@ -739,7 +731,7 @@ class ModernButton(QPushButton):
                     background-color: {COLORS['warning_hover']};
                 }}
             """
-        else:  # secondary
+        else:
             style = base_style + f"""
                 QPushButton {{
                     background-color: {COLORS['surface']};
@@ -773,7 +765,6 @@ class ChatWidget(QWidget):
         self.layout.setSpacing(12)
         self.setLayout(self.layout)
 
-        # Chat messages area
         self.central_widget = QTextEdit(self)
         self.central_widget.setReadOnly(True)
         self.central_widget.setStyleSheet(f"""
@@ -788,7 +779,6 @@ class ChatWidget(QWidget):
         """)
         self.layout.addWidget(self.central_widget)
 
-        # Client selection menu
         self.clients_menu = QMenu("Clients", self)
         self.clients_menu.aboutToShow.connect(self.resize_clients_menu)
         self.clients_menu.setStyleSheet(f"""
@@ -810,14 +800,13 @@ class ChatWidget(QWidget):
         self.clients_checkboxes = {}
         self.clients_menu_actions = {}
 
-        self.select_all_checkbox, _ = self.add_client("")  # Select All Checkbox
+        self.select_all_checkbox, _ = self.add_client("")
         self.clients_menu.addSeparator()
 
         self.clients_button = ModernButton("Select Recipients", "secondary", self)
         self.clients_button.setMenu(self.clients_menu)
         self.layout.addWidget(self.clients_button)
 
-        # Control buttons section
         buttons_frame = QFrame()
         buttons_layout = QHBoxLayout(buttons_frame)
         buttons_layout.setSpacing(12)
@@ -830,7 +819,6 @@ class ChatWidget(QWidget):
         
         self.layout.addWidget(buttons_frame)
 
-        # Message input section
         message_frame = QFrame()
         message_layout = QVBoxLayout(message_frame)
         message_layout.setSpacing(8)
@@ -839,19 +827,18 @@ class ChatWidget(QWidget):
         self.line_edit.setPlaceholderText("Type your message here...")
         self.line_edit.setStyleSheet(f"""
             QLineEdit {{
-                padding: 6px 10px;   /* smaller padding */
+                padding: 6px 10px;
                 border: 2px solid {COLORS['border']};
                 border-radius: 8px;
                 font-size: 14px;
                 background-color: {COLORS['surface']};
-                min-height: 32px;   /* ensures full text visibility */
+                min-height: 32px;
             }}
             QLineEdit:focus {{
                 border-color: {COLORS['border_focus']};
                 outline: none;
             }}
         """)
-
         
         self.send_button = ModernButton("Send Message", "primary", self)
         
@@ -860,10 +847,8 @@ class ChatWidget(QWidget):
         
         self.layout.addWidget(message_frame)
 
-        # Spacing
         self.layout.addSpacing(20)
 
-        # End call button
         self.end_button = ModernButton("End Call", "danger", self)
         self.layout.addWidget(self.end_button)
     
@@ -891,7 +876,7 @@ class ChatWidget(QWidget):
         action_widget.setDefaultWidget(checkbox)
         self.clients_menu.addAction(action_widget)
 
-        if name == "":  # Select All Checkbox
+        if name == "":
             checkbox.setText("Select All")
             checkbox.stateChanged.connect(
                 lambda state: self.on_checkbox_click(state, is_select_all=True)
@@ -947,10 +932,6 @@ class ChatWidget(QWidget):
         formatted_msg += f"<span style='color: {COLORS['text']};'>{msg}</span></div>"
         self.central_widget.insertHtml(formatted_msg)
         
-        #
-        # Add this to the end of your qt_gui.py file to complete it
-
-        # Auto-scroll to bottom
         scrollbar = self.central_widget.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -974,7 +955,6 @@ class LoginDialog(QDialog):
         self.layout.setSpacing(20)
         self.setLayout(self.layout)
 
-        # Title
         title_label = QLabel("Enter Your Username")
         title_label.setStyleSheet(f"""
             QLabel {{
@@ -987,7 +967,6 @@ class LoginDialog(QDialog):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.layout.addWidget(title_label)
 
-        # Username input
         self.name_edit = QLineEdit(self)
         self.name_edit.setPlaceholderText("Enter your username...")
         self.name_edit.setStyleSheet(f"""
@@ -1007,7 +986,6 @@ class LoginDialog(QDialog):
 
         self.layout.addWidget(self.name_edit)
 
-        # Join button
         self.button = ModernButton("Join Conference", "primary", self)
         self.layout.addWidget(self.button)
 
@@ -1058,14 +1036,11 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        # Video area
         self.video_list_widget = VideoListWidget()
         self.setCentralWidget(self.video_list_widget)
 
-        # Create chat widget BEFORE using it
         self.chat_widget = ChatWidget()
 
-        # Chat sidebar
         self.sidebar = QDockWidget("Chat & Controls", self)
         self.sidebar.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         self.sidebar.setStyleSheet(f"""
@@ -1085,20 +1060,17 @@ class MainWindow(QMainWindow):
         self.sidebar.setWidget(self.chat_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar)
         
-        # Connect chat widget signals
         self.chat_widget.send_button.clicked.connect(lambda: self.send_msg(TEXT))
         self.chat_widget.line_edit.returnPressed.connect(lambda: self.send_msg(TEXT))
         self.chat_widget.file_button.clicked.connect(lambda: self.send_msg(FILE))
         self.chat_widget.gesture_button.clicked.connect(self.toggle_gesture_control)
         self.chat_widget.end_button.clicked.connect(self.close)
 
-        # Modern menu bar
         self.setup_menu_bar()
         
-        # Initialize video controls overlay
         self.controls_overlay = VideoControlsOverlay(self)
         self.controls_overlay.show()
-        # Initialize UI states to match client states
+        
         self.update_camera_ui_state()
         self.update_microphone_ui_state()
 
@@ -1149,15 +1121,12 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        # Camera menu
         self.camera_menu = menubar.addMenu("📹 Camera")
         self.camera_menu.addAction("Disable", self.toggle_camera)
         
-        # Microphone menu
         self.microphone_menu = menubar.addMenu("🎤 Microphone")
         self.microphone_menu.addAction("Disable", self.toggle_microphone)
         
-        # Layout menu
         self.layout_menu = menubar.addMenu("📐 Layout")
         self.layout_actions = {}
         layout_action_group = QActionGroup(self)
@@ -1229,18 +1198,14 @@ class MainWindow(QMainWindow):
     def update_camera_ui_state(self):
         """Update all camera-related UI elements to match current state"""
         if self.client.camera_enabled:
-            # Menu
             self.camera_menu.actions()[0].setText("Disable")
-            # Video controls overlay
             if hasattr(self, 'controls_overlay'):
                 self.controls_overlay.camera_btn.is_active = True
                 self.controls_overlay.camera_btn.init_style()
                 self.controls_overlay.camera_btn.setText("📹")
                 self.controls_overlay.camera_btn.setToolTip("Camera On - Click to turn off")
         else:
-            # Menu
             self.camera_menu.actions()[0].setText("Enable")
-            # Video controls overlay
             if hasattr(self, 'controls_overlay'):
                 self.controls_overlay.camera_btn.is_active = False
                 self.controls_overlay.camera_btn.init_style()
@@ -1250,18 +1215,14 @@ class MainWindow(QMainWindow):
     def update_microphone_ui_state(self):
         """Update all microphone-related UI elements to match current state"""
         if self.client.microphone_enabled:
-            # Menu
             self.microphone_menu.actions()[0].setText("Disable")
-            # Video controls overlay
             if hasattr(self, 'controls_overlay'):
                 self.controls_overlay.mic_btn.is_active = True
                 self.controls_overlay.mic_btn.init_style()
                 self.controls_overlay.mic_btn.setText("🎤")
                 self.controls_overlay.mic_btn.setToolTip("Microphone On - Click to turn off")
         else:
-            # Menu
             self.microphone_menu.actions()[0].setText("Enable")
-            # Video controls overlay
             if hasattr(self, 'controls_overlay'):
                 self.controls_overlay.mic_btn.is_active = False
                 self.controls_overlay.mic_btn.init_style()
@@ -1278,57 +1239,13 @@ class MainWindow(QMainWindow):
         self.client.microphone_enabled = not self.client.microphone_enabled
         self.update_microphone_ui_state()
     
-    # def toggle_gesture_control(self):
-    #     """Handle gesture control button click"""
-    #     if not hasattr(self, 'gesture_controller'):
-    #         # Import and initialize gesture controller
-    #         try:
-    #             from gesture_control import integrate_gesture_control
-    #             self.gesture_controller = integrate_gesture_control(self)
-    #             if self.gesture_controller is None:
-    #                 return  # MediaPipe not available
-                    
-    #             # Connect gesture controller to camera for overlay drawing
-    #             if self.client.camera:
-    #                 self.client.camera.set_gesture_controller(self.gesture_controller)
-                    
-    #             self.gesture_controller.start()
-    #             self.chat_widget.gesture_button.setText("Stop Gesture Control")
-    #             self.chat_widget.gesture_button.button_type = "danger"
-    #             self.chat_widget.gesture_button.init_style()
-                
-    #         except Exception as e:
-    #             QMessageBox.critical(self, "Error", f"Failed to start gesture control: {str(e)}")
-    #     else:
-    #         # Stop gesture control
-    #         # in qt_gui.py (toggle_gesture_control stop branch)
-    #         self.gesture_controller.stop_gesture_control()   # existing
-    #         # Wait until thread definitely stopped
-    #         if self.gesture_controller.isRunning():
-    #             self.gesture_controller.wait(3000)
-
-    #         # Now it's safe to remove controller
-    #         if self.client.camera:
-    #             self.client.camera.set_gesture_controller(None)
-
-    #         self.gesture_controller = None
-
-    #         self.chat_widget.gesture_button.setText("Gesture Control")
-    #         self.chat_widget.gesture_button.button_type = "warning"
-    #         self.chat_widget.gesture_button.init_style()
-    # Replace the toggle_gesture_control method in MainWindow class with this:
-
-    # Replace the toggle_gesture_control method in MainWindow class with this:
-
     def toggle_gesture_control(self):
         """Handle gesture control button click with proper mode selection and cleanup"""
         from PyQt6.QtWidgets import QMessageBox, QDialog, QVBoxLayout, QLabel, QRadioButton, QDialogButtonBox
         from PyQt6.QtCore import QTimer
         
-        # If controller doesn't exist -> create and start it
         if not hasattr(self, 'gesture_controller') or self.gesture_controller is None:
             try:
-                # Show mode selection dialog
                 dialog = QDialog(self)
                 dialog.setWindowTitle("Gesture Control Mode")
                 dialog.setFixedSize(450, 220)
@@ -1341,7 +1258,7 @@ class MainWindow(QMainWindow):
                 layout.addWidget(label)
                 
                 preview_mode = QRadioButton("Preview Only (local display changes only)")
-                preview_mode.setChecked(True)  # Default
+                preview_mode.setChecked(True)
                 preview_mode.setStyleSheet(f"font-size: 13px; color: {COLORS['text']}; padding: 8px;")
                 
                 camera_mode = QRadioButton("Camera Control (affects transmission to all clients)")
@@ -1380,13 +1297,11 @@ class MainWindow(QMainWindow):
                 from gesture_control import integrate_gesture_control
                 self.gesture_controller = integrate_gesture_control(self, control_transmission)
                 if self.gesture_controller is None:
-                    return  # MediaPipe not available
+                    return
 
-                # Connect gesture controller to camera for overlay drawing
                 if self.client and getattr(self.client, "camera", None):
                     self.client.camera.set_gesture_controller(self.gesture_controller)
 
-                # Update UI immediately
                 try:
                     self.chat_widget.gesture_button.setText("Starting...")
                     self.chat_widget.gesture_button.button_type = "secondary"
@@ -1394,11 +1309,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                # Start the controller with delay
                 def _start_controller():
                     try:
                         self.gesture_controller.start()
-                        # Update UI to show it's running
                         try:
                             mode_text = "Camera Control" if control_transmission else "Preview Only"
                             self.chat_widget.gesture_button.setText(f"Stop Gesture ({mode_text})")
@@ -1412,7 +1325,6 @@ class MainWindow(QMainWindow):
                         except Exception:
                             print(f"Failed to start gesture control: {e}")
 
-                        # Cleanup on failure
                         try:
                             if self.client and getattr(self.client, "camera", None):
                                 self.client.camera.set_gesture_controller(None)
@@ -1427,7 +1339,6 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
 
-                # Delayed start (250ms) to avoid blocking UI
                 QTimer.singleShot(250, _start_controller)
 
             except Exception as e:
@@ -1436,7 +1347,6 @@ class MainWindow(QMainWindow):
                 except Exception:
                     print(f"Failed to initialize gesture control: {e}")
                 
-                # Cleanup
                 try:
                     if getattr(self, "gesture_controller", None):
                         if self.client and getattr(self.client, "camera", None):
@@ -1446,9 +1356,7 @@ class MainWindow(QMainWindow):
                     pass
 
         else:
-            # Stop gesture control - PROPER CLEANUP
             try:
-                # Update UI immediately
                 try:
                     self.chat_widget.gesture_button.setText("Stopping...")
                     self.chat_widget.gesture_button.button_type = "secondary"
@@ -1456,14 +1364,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 
-                # Disconnect from camera FIRST (prevents further frame updates)
                 try:
                     if self.client and getattr(self.client, "camera", None):
                         self.client.camera.set_gesture_controller(None)
                 except Exception as e:
                     print(f"Error disconnecting camera from gesture controller: {e}")
                 
-                # Stop the thread
                 try:
                     if hasattr(self.gesture_controller, "stop_gesture_control"):
                         self.gesture_controller.stop_gesture_control()
@@ -1473,17 +1379,14 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"Error while stopping gesture controller: {e}")
 
-                # Wait for thread to fully stop
                 try:
                     if hasattr(self.gesture_controller, "isRunning") and self.gesture_controller.isRunning():
                         self.gesture_controller.wait(3000)
                 except Exception as e:
                     print(f"Error waiting for gesture thread: {e}")
 
-                # Clear the reference
                 self.gesture_controller = None
 
-                # Reset button UI
                 try:
                     self.chat_widget.gesture_button.setText("Gesture Control")
                     self.chat_widget.gesture_button.button_type = "warning"
@@ -1493,7 +1396,6 @@ class MainWindow(QMainWindow):
                     
             except Exception as e:
                 print(f"Error during gesture control cleanup: {e}")
-                # Force cleanup
                 self.gesture_controller = None
                 try:
                     self.chat_widget.gesture_button.setText("Gesture Control")
