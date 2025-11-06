@@ -188,12 +188,15 @@ class AudioThread(QThread):
             self.stream.write(data)
 
 
+# In qt_gui.py, replace the Camera class with this fixed version:
+
 class Camera:
     def __init__(self):
         self.cap = None
         self.camera_available = False
         self.gesture_controller = None
-        self.max_frame_size = 28000
+        # CRITICAL FIX: Reduce max frame size to account for pickle overhead
+        self.max_frame_size = 25000  # Much safer limit (was 28000)
         
         try:
             self.cap = cv2.VideoCapture(0)
@@ -246,8 +249,9 @@ class Camera:
             tx_frame = frame.copy()
             
             if ENABLE_ENCODE:
-                quality = 50
-                max_attempts = 5
+                # Start with lower quality to ensure we fit within packet size
+                quality = 40  # Lower starting quality (was 50)
+                max_attempts = 8  # More attempts (was 5)
                 
                 for attempt in range(max_attempts):
                     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
@@ -255,24 +259,35 @@ class Camera:
                     
                     if not success:
                         print(f"[CAMERA] Encoding failed at quality {quality}")
-                        return None
+                        quality = max(5, quality - 5)
+                        continue
                     
-                    estimated_packet_size = len(encoded) + 500
+                    # Account for pickle overhead (approximately 200-300 bytes)
+                    estimated_packet_size = len(encoded) + 300
                     
                     if estimated_packet_size <= self.max_frame_size:
+                        # Success! Frame fits within limits
                         return encoded
                     
-                    quality = max(10, quality - 10)
+                    # Too large, reduce quality
+                    quality = max(5, quality - 5)
+                    
                     if attempt == max_attempts - 1:
-                        print(f"[CAMERA] Warning: Using minimum quality to meet packet size")
-                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 10]
+                        # Last attempt - use minimum quality
+                        print(f"[CAMERA] Warning: Frame too large ({estimated_packet_size} bytes), using minimum quality")
+                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 5]
                         success, encoded = cv2.imencode('.jpg', cv2.cvtColor(tx_frame, cv2.COLOR_RGB2BGR), encode_param)
-                        if success and len(encoded) + 500 <= self.max_frame_size:
-                            return encoded
-                        else:
-                            print(f"[CAMERA] ERROR: Cannot encode frame small enough ({len(encoded) + 500} bytes)")
-                            return None
+                        
+                        if success:
+                            estimated_size = len(encoded) + 300
+                            if estimated_size <= self.max_frame_size:
+                                return encoded
+                            else:
+                                # Still too large - skip this frame
+                                print(f"[CAMERA] ERROR: Cannot encode frame small enough ({estimated_size} bytes) - SKIPPING FRAME")
+                                return None
                 
+                # Should never reach here, but return None if we do
                 return None
             else:
                 return tx_frame
