@@ -13,7 +13,7 @@ from datetime import datetime
 from constants import *
 
 IP = socket.gethostbyname(socket.gethostname())
-IP = "192.168.33.55"  # Uncomment and set manually if needed
+IP = "192.168.220.55"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
@@ -271,12 +271,29 @@ class ServerConnection(QThread):
             self.add_msg_signal.emit("System", f"Error sending file: {e}")
     
     def media_broadcast_loop(self, conn: socket.socket, media: str):
+        """
+        FIXED: Improved connection stability during gesture control state changes
+        """
         consecutive_errors = 0
         max_errors = 5
+        last_camera_state = None
+        
+        # FIXED: Add small initial delay for thread stability
+        time.sleep(0.2)
         
         while self.connected:
             try:
                 if media == VIDEO:
+                    # FIXED: Check for camera state changes
+                    current_camera_state = client.camera_enabled
+                    
+                    # Log state changes
+                    if last_camera_state != current_camera_state:
+                        print(f"[VIDEO_BROADCAST] Camera state changed: {last_camera_state} -> {current_camera_state}")
+                        last_camera_state = current_camera_state
+                        # Brief pause during state transition
+                        time.sleep(0.05)
+                    
                     data = client.get_video()
                     
                     # CRITICAL: Always send something, even if camera is off
@@ -310,9 +327,18 @@ class ServerConnection(QThread):
                 else:
                     print(f"[ERROR] Invalid media type: {media}")
                     break
-                    
-                self.send_msg(conn, msg)
-                consecutive_errors = 0
+                
+                # FIXED: Add retry logic for send failures
+                try:
+                    self.send_msg(conn, msg)
+                    consecutive_errors = 0
+                except Exception as send_error:
+                    print(f"[WARNING] Send error in {media} broadcast: {send_error}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_errors:
+                        raise send_error
+                    time.sleep(0.05)
+                    continue
                 
                 if media == VIDEO:
                     time.sleep(0.033)  # ~30 FPS
@@ -328,6 +354,8 @@ class ServerConnection(QThread):
                     break
                     
                 time.sleep(0.1)
+        
+        print(f"[{media}_BROADCAST] Broadcast loop exited")
 
     def handle_conn(self, conn: socket.socket, media: str):
         """Handle connection for TEXT (TCP) or VIDEO/AUDIO (UDP)"""
