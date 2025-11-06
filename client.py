@@ -13,7 +13,7 @@ from datetime import datetime
 from constants import *
 
 IP = socket.gethostbyname(socket.gethostname())
-# IP = "192.168.220.55"  # Uncomment and set manually if needed
+IP = "192.168.220.55"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 

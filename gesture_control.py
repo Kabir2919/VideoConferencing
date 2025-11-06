@@ -9,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    FIXED: Proper signal handling and camera state control
+    FIXED: Keep camera capturing for detection even when transmission is OFF
     """
 
     status_update_signal = pyqtSignal(str)
@@ -45,6 +45,9 @@ class GestureController(QThread):
         
         # FIXED: Track what gesture control thinks camera state should be
         self.gesture_camera_state = True
+        
+        # CRITICAL FIX: Own camera capture for continuous detection
+        self.detection_cap = None
 
         self.status_update_signal.connect(self.update_status)
         self.initialization_complete_signal.connect(self.on_initialization_complete)
@@ -55,7 +58,6 @@ class GestureController(QThread):
     def _set_camera_state_slot(self, state):
         """Slot to handle camera state changes - runs in main thread"""
         try:
-            # FIXED: Force state change even if it appears to be the same
             print(f"[GESTURE] Setting camera state to: {state} (current: {self.main_window.client.camera_enabled})")
             self.main_window.client.camera_enabled = state
             self.gesture_camera_state = state
@@ -91,6 +93,22 @@ class GestureController(QThread):
                 min_detection_confidence=0.5
             )
             
+            # CRITICAL FIX: Open dedicated camera for detection
+            if self.control_transmission:
+                try:
+                    self.detection_cap = cv2.VideoCapture(0)
+                    if self.detection_cap.isOpened():
+                        # Use lower resolution for detection only
+                        self.detection_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                        self.detection_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                        print("[GESTURE] Dedicated detection camera initialized")
+                    else:
+                        print("[GESTURE] Warning: Could not open dedicated detection camera")
+                        self.detection_cap = None
+                except Exception as e:
+                    print(f"[GESTURE] Error opening detection camera: {e}")
+                    self.detection_cap = None
+            
             self.initialized = True
             self.initialization_complete_signal.emit(True)
             mode = "with camera control" if self.control_transmission else "preview only"
@@ -104,15 +122,28 @@ class GestureController(QThread):
 
         while self.running and self.initialized:
             try:
-                with self.frame_lock:
-                    if self.last_detection_frame is None:
-                        time.sleep(0.05)
-                        continue
-                    frame = self.last_detection_frame.copy()
+                # CRITICAL FIX: Get frame from dedicated camera OR from buffer
+                frame = None
+                
+                if self.control_transmission and self.detection_cap is not None:
+                    # Use dedicated camera for continuous detection
+                    ret, frame = self.detection_cap.read()
+                    if ret and frame is not None:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    else:
+                        frame = None
+                
+                # Fallback to frame buffer if dedicated camera fails
+                if frame is None:
+                    with self.frame_lock:
+                        if self.last_detection_frame is not None:
+                            frame = self.last_detection_frame.copy()
+                
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
 
-                rgb_frame = frame
-
-                results = self.face_detection.process(rgb_frame)
+                results = self.face_detection.process(frame)
                 self.detection_results = results
 
                 face_detected = results.detections is not None and len(results.detections) > 0
@@ -130,6 +161,14 @@ class GestureController(QThread):
                 self.status_update_signal.emit(f"Gesture Control: Error - {str(e)}")
                 time.sleep(1)
 
+        # Cleanup
+        if self.detection_cap is not None:
+            try:
+                self.detection_cap.release()
+                print("[GESTURE] Detection camera released")
+            except:
+                pass
+        
         self.status_update_signal.emit("Gesture Control: Stopped")
 
     def on_initialization_complete(self, success):
@@ -279,10 +318,9 @@ class GestureController(QThread):
 
     def handle_camera_transmission(self, face_detected):
         """
-        FIXED: Control actual camera transmission based on face presence.
+        Control actual camera transmission based on face presence.
         This will turn the camera on/off for ALL clients.
         """
-        # FIXED: Use our tracked state instead of querying main window
         current_camera_state = self.gesture_camera_state
         
         # Turn camera OFF when face is lost
@@ -291,7 +329,7 @@ class GestureController(QThread):
                 and current_camera_state):
             print(f"[GESTURE] Face lost for {self.face_absent_counter} frames, turning camera OFF")
             self.set_camera_state_signal.emit(False)
-            self.status_update_signal.emit("Gesture: Face lost → Camera transmission OFF")
+            self.status_update_signal.emit("Gesture: Face lost → Camera transmission OFF (still detecting)")
 
         # Turn camera ON when face is detected
         if (face_detected
@@ -328,6 +366,27 @@ class GestureController(QThread):
     def stop_gesture_control(self):
         """Stop the gesture control thread"""
         self.running = False
+        
+        # CRITICAL FIX: Restore camera state before stopping
+        if self.control_transmission:
+            # If we were controlling transmission, ensure camera is turned back ON
+            try:
+                print("[GESTURE] Restoring camera state before stopping")
+                self.set_camera_state_signal.emit(True)
+                # Give it a moment to process
+                import time
+                time.sleep(0.1)
+            except Exception as e:
+                print(f"[GESTURE] Error restoring camera state: {e}")
+        
+        # Release detection camera
+        if self.detection_cap is not None:
+            try:
+                self.detection_cap.release()
+            except:
+                pass
+            self.detection_cap = None
+        
         if self.isRunning():
             self.wait(3000)
         
@@ -421,6 +480,21 @@ class AdvancedGestureController(GestureController):
                 min_tracking_confidence=0.5
             )
             
+            # CRITICAL FIX: Open dedicated camera for detection
+            if self.control_transmission:
+                try:
+                    self.detection_cap = cv2.VideoCapture(0)
+                    if self.detection_cap.isOpened():
+                        self.detection_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                        self.detection_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                        print("[GESTURE] Dedicated detection camera initialized")
+                    else:
+                        print("[GESTURE] Warning: Could not open dedicated detection camera")
+                        self.detection_cap = None
+                except Exception as e:
+                    print(f"[GESTURE] Error opening detection camera: {e}")
+                    self.detection_cap = None
+            
             self.initialized = True
             self.initialization_complete_signal.emit(True)
             mode = "with camera control" if self.control_transmission else "preview only"
@@ -434,15 +508,26 @@ class AdvancedGestureController(GestureController):
 
         while self.running and self.initialized:
             try:
-                with self.frame_lock:
-                    if self.last_detection_frame is None:
-                        time.sleep(0.05)
-                        continue
-                    frame = self.last_detection_frame.copy()
+                # CRITICAL FIX: Get frame from dedicated camera OR from buffer
+                frame = None
+                
+                if self.control_transmission and self.detection_cap is not None:
+                    ret, frame = self.detection_cap.read()
+                    if ret and frame is not None:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    else:
+                        frame = None
+                
+                if frame is None:
+                    with self.frame_lock:
+                        if self.last_detection_frame is not None:
+                            frame = self.last_detection_frame.copy()
+                
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
 
-                rgb_frame = frame
-
-                face_results = self.face_detection.process(rgb_frame)
+                face_results = self.face_detection.process(frame)
                 face_detected = face_results.detections is not None and len(face_results.detections) > 0
 
                 self.detection_results = face_results
@@ -454,7 +539,7 @@ class AdvancedGestureController(GestureController):
                 else:
                     self.handle_local_hide(face_detected)
 
-                hand_results = self.hands.process(rgb_frame)
+                hand_results = self.hands.process(frame)
                 self.hand_results = hand_results
 
                 if hand_results.multi_hand_landmarks:
@@ -465,6 +550,14 @@ class AdvancedGestureController(GestureController):
             except Exception as e:
                 self.status_update_signal.emit(f"Advanced Gesture Control: Error - {str(e)}")
                 time.sleep(1)
+
+        # Cleanup
+        if self.detection_cap is not None:
+            try:
+                self.detection_cap.release()
+                print("[GESTURE] Detection camera released")
+            except:
+                pass
 
         self.status_update_signal.emit("Advanced Gesture Control: Stopped")
 
@@ -567,10 +660,9 @@ class AdvancedGestureController(GestureController):
                     self.gesture_counter = 0
 
     def detect_gesture(self, hand_landmarks):
-        """Enhanced gesture detection with better finger extension logic"""
+        """Enhanced gesture detection"""
         try:
             landmarks = hand_landmarks.landmark
-
             wrist = landmarks[self.mp_hands.HandLandmark.WRIST]
             thumb_tip = landmarks[self.mp_hands.HandLandmark.THUMB_TIP]
             thumb_mcp = landmarks[self.mp_hands.HandLandmark.THUMB_CMC]
@@ -592,47 +684,22 @@ class AdvancedGestureController(GestureController):
             middle_extended = is_finger_extended(middle_tip, middle_mcp, wrist)
             ring_extended = is_finger_extended(ring_tip, ring_mcp, wrist)
             pinky_extended = is_finger_extended(pinky_tip, pinky_mcp, wrist)
-            
             thumb_extended = ((thumb_tip.x - thumb_mcp.x)**2 + (thumb_tip.y - thumb_mcp.y)**2)**0.5 > 0.1
             
-            fingers_extended = [
-                thumb_extended,
-                index_extended,
-                middle_extended,
-                ring_extended,
-                pinky_extended
-            ]
-            
+            fingers_extended = [thumb_extended, index_extended, middle_extended, ring_extended, pinky_extended]
             num_extended = sum(fingers_extended)
 
-            if (index_extended and 
-                not middle_extended and 
-                not ring_extended and 
-                not pinky_extended and
-                not thumb_extended):
+            if index_extended and not middle_extended and not ring_extended and not pinky_extended and not thumb_extended:
                 return "pointing_up"
-
-            if (index_extended and 
-                middle_extended and 
-                not ring_extended and 
-                not pinky_extended):
+            if index_extended and middle_extended and not ring_extended and not pinky_extended:
                 return "peace_sign"
-
             if num_extended >= 4:
                 return "open_palm"
-
-            if (thumb_extended and
-                not index_extended and
-                not middle_extended and
-                not ring_extended and
-                not pinky_extended):
+            if thumb_extended and not index_extended and not middle_extended and not ring_extended and not pinky_extended:
                 return "thumbs_up"
-            
             if num_extended == 0:
                 return "fist"
-
             return None
-            
         except Exception as e:
             print(f"[GESTURE] Gesture detection error: {e}")
             return None
@@ -645,66 +712,39 @@ class AdvancedGestureController(GestureController):
                 self.main_window.toggle_microphone()
                 status = "ON" if not current_mic_state else "OFF"
                 self.status_update_signal.emit(f"Gesture: Thumbs up -> Microphone {status}")
-
             elif gesture == "peace_sign":
                 current_camera_state = self.main_window.client.camera_enabled
                 self.main_window.toggle_camera()
                 status = "ON" if not current_camera_state else "OFF"
                 self.status_update_signal.emit(f"Gesture: Peace sign -> Camera {status}")
-
             elif gesture == "open_palm":
                 try:
                     from constants import Message, POST, TEXT
-                    
                     recipients = []
-                    
                     try:
                         video_list = self.main_window.video_list_widget
                         for client_name in video_list.all_items.keys():
                             if client_name != self.main_window.client.name:
                                 recipients.append(client_name)
-                        print(f"[GESTURE] Found {len(recipients)} recipients from video_list")
-                    except Exception as e:
-                        print(f"[GESTURE] Error getting clients from video list: {e}")
-                    
+                    except:
+                        pass
                     if len(recipients) == 0:
                         try:
                             from client import all_clients
-                            for name in all_clients.keys():
-                                if name != self.main_window.client.name:
-                                    recipients.append(name)
-                            print(f"[GESTURE] Found {len(recipients)} recipients from all_clients")
-                        except Exception as e:
-                            print(f"[GESTURE] Error getting all_clients: {e}")
-                    
+                            recipients = [name for name in all_clients.keys() if name != self.main_window.client.name]
+                        except:
+                            pass
                     if len(recipients) > 0:
                         hello_msg = "Hello! [Wave]"
-                        msg = Message(
-                            self.main_window.client.name, 
-                            POST, 
-                            TEXT, 
-                            data=hello_msg, 
-                            to_names=tuple(recipients)
-                        )
-                        self.main_window.server_conn.send_msg(
-                            self.main_window.server_conn.main_socket, 
-                            msg
-                        )
-                        
-                        self.main_window.chat_widget.add_msg(
-                            "You", 
-                            ", ".join(recipients), 
-                            hello_msg
-                        )
+                        msg = Message(self.main_window.client.name, POST, TEXT, data=hello_msg, to_names=tuple(recipients))
+                        self.main_window.server_conn.send_msg(self.main_window.server_conn.main_socket, msg)
+                        self.main_window.chat_widget.add_msg("You", ", ".join(recipients), hello_msg)
                         self.status_update_signal.emit(f"Gesture: Open palm -> Sent Hello to {len(recipients)} client(s)")
                     else:
                         self.status_update_signal.emit("Gesture: Open palm -> No other clients connected")
                 except Exception as e:
                     print(f"[GESTURE] Error sending hello: {e}")
-                    import traceback
-                    traceback.print_exc()
                     self.status_update_signal.emit(f"Gesture: Error sending hello - {str(e)}")
-                    
             elif gesture == "fist":
                 if self.main_window.client.camera_enabled or self.main_window.client.microphone_enabled:
                     if self.main_window.client.camera_enabled:
@@ -718,53 +758,35 @@ class AdvancedGestureController(GestureController):
                     if not self.main_window.client.microphone_enabled:
                         self.main_window.toggle_microphone()
                     self.status_update_signal.emit("Gesture: Fist -> Unmuted all")
-                    
             elif gesture == "pointing_up":
                 try:
                     from constants import Message, POST, TEXT
-                    
                     recipients = []
                     try:
                         video_list = self.main_window.video_list_widget
                         for client_name in video_list.all_items.keys():
                             if client_name != self.main_window.client.name:
                                 recipients.append(client_name)
-                    except Exception as e:
-                        print(f"[GESTURE] Error getting clients: {e}")
-                    
+                    except:
+                        pass
                     if len(recipients) == 0:
                         try:
                             from client import all_clients
                             recipients = [name for name in all_clients.keys() if name != self.main_window.client.name]
-                        except Exception as e:
-                            print(f"[GESTURE] Error with fallback: {e}")
-                    
+                        except:
+                            pass
                     if len(recipients) > 0:
                         attention_msg = "[Raised Hand - Requesting Attention]"
-                        msg = Message(
-                            self.main_window.client.name,
-                            POST,
-                            TEXT,
-                            data=attention_msg,
-                            to_names=tuple(recipients)
-                        )
-                        self.main_window.server_conn.send_msg(
-                            self.main_window.server_conn.main_socket,
-                            msg
-                        )
+                        msg = Message(self.main_window.client.name, POST, TEXT, data=attention_msg, to_names=tuple(recipients))
+                        self.main_window.server_conn.send_msg(self.main_window.server_conn.main_socket, msg)
                         self.main_window.chat_widget.add_msg("You", ", ".join(recipients), attention_msg)
                         self.status_update_signal.emit(f"Gesture: Pointing up -> Raised hand to {len(recipients)} client(s)")
                     else:
                         self.status_update_signal.emit("Gesture: Pointing up -> No other clients connected")
                 except Exception as e:
                     print(f"[GESTURE] Error raising hand: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    
         except Exception as e:
             print(f"[GESTURE] Command execution error: {e}")
-            import traceback
-            traceback.print_exc()
 
 
 def integrate_gesture_control(main_window, control_transmission=False):
