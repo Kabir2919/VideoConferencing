@@ -330,11 +330,12 @@ class GestureController(QThread):
 
     # Replace the handle_camera_transmission method in gesture_control.py
 
+    # Replace the handle_camera_transmission method in gesture_control.py
+
     def handle_camera_transmission(self, face_detected):
         """
         TRANSMISSION CONTROL MODE: Actually turn camera on/off for transmission.
-        This affects what OTHER clients see.
-        FIXED: Added comprehensive logging and state verification
+        FIXED: Prevent rapid toggling by NOT resetting counters after action
         """
         if not self.control_transmission:
             return  # Safety check
@@ -342,33 +343,29 @@ class GestureController(QThread):
         with self.state_change_lock:
             current_camera_state = self.main_window.client.camera_enabled
             
-            # Debug logging
-            if self.face_absent_counter > 0 or self.face_present_counter > 0:
-                if not face_detected and self.face_absent_counter % 10 == 0:
-                    print(f"[GESTURE_TX] No face: absent={self.face_absent_counter}/{self.face_absent_threshold}, camera={current_camera_state}")
-                elif face_detected and self.face_present_counter % 10 == 0:
-                    print(f"[GESTURE_TX] Face detected: present={self.face_present_counter}/{self.face_present_threshold}, camera={current_camera_state}")
+            # Debug logging (reduced frequency)
+            if self.face_absent_counter > 0 and self.face_absent_counter % 30 == 0:
+                print(f"[GESTURE_TX] No face: absent={self.face_absent_counter}/{self.face_absent_threshold}, camera={current_camera_state}")
+            elif self.face_present_counter > 0 and self.face_present_counter % 30 == 0:
+                print(f"[GESTURE_TX] Face detected: present={self.face_present_counter}/{self.face_present_threshold}, camera={current_camera_state}")
             
-            # Turn camera OFF when face is lost
+            # Turn camera OFF when face is lost (and camera is currently ON)
             if (not face_detected
-                    and self.face_absent_counter >= self.face_absent_threshold
+                    and self.face_absent_counter == self.face_absent_threshold  # Only trigger ONCE
                     and current_camera_state):
                 print(f"[GESTURE_TX] *** TURNING CAMERA OFF *** (absent={self.face_absent_counter})")
                 self.set_camera_state_signal.emit(False)
                 self.status_update_signal.emit("Gesture [TX]: Face lost → Camera OFF")
-                # Reset counter to prevent repeated triggering
-                self.face_absent_counter = 0
+                # DON'T reset counter - let it keep incrementing
 
-            # Turn camera ON when face is detected
+            # Turn camera ON when face is detected (and camera is currently OFF)
             if (face_detected
-                    and self.face_present_counter >= self.face_present_threshold
+                    and self.face_present_counter == self.face_present_threshold  # Only trigger ONCE
                     and not current_camera_state):
                 print(f"[GESTURE_TX] *** TURNING CAMERA ON *** (present={self.face_present_counter})")
                 self.set_camera_state_signal.emit(True)
                 self.status_update_signal.emit("Gesture [TX]: Face found → Camera ON")
-                # Reset counter to prevent repeated triggering
-                self.face_present_counter = 0
-
+                # DON'T reset counter - let it keep incrementing
     def handle_local_hide(self, face_detected):
         """
         PREVIEW ONLY MODE: Only hide/show local preview.
