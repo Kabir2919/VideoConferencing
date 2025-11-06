@@ -9,14 +9,12 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    FIXED: Complete isolation between preview mode and transmission mode
+    FIXED: Proper camera toggling with stable state management
     """
 
     status_update_signal = pyqtSignal(str)
     initialization_complete_signal = pyqtSignal(bool)
     set_camera_state_signal = pyqtSignal(bool)
-
-    # In gesture_control.py, modify the __init__ method to have better thresholds
 
     def __init__(self, main_window, control_transmission=False, parent=None):
         super().__init__(parent)
@@ -37,15 +35,15 @@ class GestureController(QThread):
         self.face_present_counter = 0
         
         # FIXED: More reasonable thresholds
-        # These values give ~3 seconds before turning off, ~1 second to turn on
         if control_transmission:
             # Transmission mode: be more conservative
-            self.face_absent_threshold = 90   # ~9 seconds at 0.15s intervals (90 * 0.15 = 13.5s)
-            self.face_present_threshold = 10   # ~1.5 seconds (10 * 0.15 = 1.5s)
+            # ~4.5 seconds before turning off, ~1.5 seconds to turn on
+            self.face_absent_threshold = 30   # 30 * 0.15s = 4.5s
+            self.face_present_threshold = 10   # 10 * 0.15s = 1.5s
         else:
             # Preview mode: can be more responsive
-            self.face_absent_threshold = 30
-            self.face_present_threshold = 10
+            self.face_absent_threshold = 20    # 3 seconds
+            self.face_present_threshold = 10   # 1.5 seconds
 
         self.show_detection_boxes = True
         self.detection_results = None
@@ -56,7 +54,8 @@ class GestureController(QThread):
         # For preview-only mode
         self.local_hide_camera = False
         
-        # For transmission control mode
+        # For transmission control mode - track last action taken
+        self.last_camera_action = None  # Will store True (turned on) or False (turned off)
         self.state_change_lock = threading.Lock()
 
         self.status_update_signal.connect(self.update_status)
@@ -77,13 +76,18 @@ class GestureController(QThread):
             with self.state_change_lock:
                 current_state = self.main_window.client.camera_enabled
                 if current_state != state:
-                    print(f"[GESTURE] Transmission mode: Changing camera to {state}")
+                    print(f"[GESTURE_TX] *** Changing camera from {current_state} to {state} ***")
                     self.main_window.client.camera_enabled = state
                     self.main_window.update_camera_ui_state()
+                    self.last_camera_action = state
                     # Allow broadcast thread to stabilize
                     time.sleep(0.1)
+                else:
+                    print(f"[GESTURE_TX] Camera already in state {state}, no change needed")
         except Exception as e:
-            print(f"[GESTURE] Error setting camera state: {e}")
+            print(f"[GESTURE_TX] Error setting camera state: {e}")
+            import traceback
+            traceback.print_exc()
 
     def run(self):
         """Main thread loop with proper mode handling"""
@@ -273,7 +277,15 @@ class GestureController(QThread):
             status_text = f"Faces: {len(self.detection_results.detections) if self.detection_results.detections else 0}"
             camera_status = "ON" if self.main_window.client.camera_enabled else "OFF"
             mode_text = "TX_CTRL" if self.control_transmission else "PREVIEW"
-            status_text += f" | Cam: {camera_status} | Mode: {mode_text}"
+            
+            # Show counter status for debugging
+            if self.control_transmission:
+                if self.face_absent_counter > 0:
+                    status_text += f" | NoFace: {self.face_absent_counter}/{self.face_absent_threshold}"
+                elif self.face_present_counter > 0:
+                    status_text += f" | Face: {self.face_present_counter}/{self.face_present_threshold}"
+            
+            status_text += f" | Cam: {camera_status} | {mode_text}"
 
             (text_width, text_height), baseline = cv2.getTextSize(
                 status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
@@ -306,36 +318,30 @@ class GestureController(QThread):
             print(f"[GESTURE] Final conversion error: {e}")
             return frame
 
-    # Replace the update_face_counters method in gesture_control.py
-
     def update_face_counters(self, face_detected):
         """
         Update counters for face detection stability.
-        FIXED: Better counter management to prevent getting stuck
+        FIXED: Proper counter management with reset after action
         """
         if face_detected:
             self.face_present_counter += 1
             self.face_absent_counter = 0  # Reset absent counter
             
             # Cap the counter to prevent overflow
-            if self.face_present_counter > self.face_present_threshold + 10:
-                self.face_present_counter = self.face_present_threshold + 10
+            if self.face_present_counter > self.face_present_threshold + 5:
+                self.face_present_counter = self.face_present_threshold + 5
         else:
             self.face_absent_counter += 1
             self.face_present_counter = 0  # Reset present counter
             
             # Cap the counter to prevent overflow
-            if self.face_absent_counter > self.face_absent_threshold + 10:
-                self.face_absent_counter = self.face_absent_threshold + 10
-
-    # Replace the handle_camera_transmission method in gesture_control.py
-
-    # Replace the handle_camera_transmission method in gesture_control.py
+            if self.face_absent_counter > self.face_absent_threshold + 5:
+                self.face_absent_counter = self.face_absent_threshold + 5
 
     def handle_camera_transmission(self, face_detected):
         """
-        TRANSMISSION CONTROL MODE: Actually turn camera on/off for transmission.
-        FIXED: Prevent rapid toggling by NOT resetting counters after action
+        TRANSMISSION CONTROL MODE: Turn camera on/off for transmission.
+        FIXED: Proper state tracking to enable toggling
         """
         if not self.control_transmission:
             return  # Safety check
@@ -343,29 +349,26 @@ class GestureController(QThread):
         with self.state_change_lock:
             current_camera_state = self.main_window.client.camera_enabled
             
-            # Debug logging (reduced frequency)
-            if self.face_absent_counter > 0 and self.face_absent_counter % 30 == 0:
-                print(f"[GESTURE_TX] No face: absent={self.face_absent_counter}/{self.face_absent_threshold}, camera={current_camera_state}")
-            elif self.face_present_counter > 0 and self.face_present_counter % 30 == 0:
-                print(f"[GESTURE_TX] Face detected: present={self.face_present_counter}/{self.face_present_threshold}, camera={current_camera_state}")
-            
-            # Turn camera OFF when face is lost (and camera is currently ON)
-            if (not face_detected
-                    and self.face_absent_counter == self.face_absent_threshold  # Only trigger ONCE
-                    and current_camera_state):
-                print(f"[GESTURE_TX] *** TURNING CAMERA OFF *** (absent={self.face_absent_counter})")
+            # Turn camera OFF when face is lost
+            if (not face_detected 
+                    and self.face_absent_counter >= self.face_absent_threshold
+                    and current_camera_state
+                    and self.last_camera_action != False):  # Only if we haven't already turned it off
+                
+                print(f"[GESTURE_TX] *** TURNING CAMERA OFF *** (absent={self.face_absent_counter}/{self.face_absent_threshold})")
                 self.set_camera_state_signal.emit(False)
                 self.status_update_signal.emit("Gesture [TX]: Face lost → Camera OFF")
-                # DON'T reset counter - let it keep incrementing
 
-            # Turn camera ON when face is detected (and camera is currently OFF)
-            if (face_detected
-                    and self.face_present_counter == self.face_present_threshold  # Only trigger ONCE
-                    and not current_camera_state):
-                print(f"[GESTURE_TX] *** TURNING CAMERA ON *** (present={self.face_present_counter})")
+            # Turn camera ON when face is detected
+            elif (face_detected 
+                    and self.face_present_counter >= self.face_present_threshold
+                    and not current_camera_state
+                    and self.last_camera_action != True):  # Only if we haven't already turned it on
+                
+                print(f"[GESTURE_TX] *** TURNING CAMERA ON *** (present={self.face_present_counter}/{self.face_present_threshold})")
                 self.set_camera_state_signal.emit(True)
                 self.status_update_signal.emit("Gesture [TX]: Face found → Camera ON")
-                # DON'T reset counter - let it keep incrementing
+
     def handle_local_hide(self, face_detected):
         """
         PREVIEW ONLY MODE: Only hide/show local preview.
@@ -411,8 +414,9 @@ class GestureController(QThread):
         if self.isRunning():
             self.wait(3000)
         
-        # Reset local hide state
+        # Reset states
         self.local_hide_camera = False
+        self.last_camera_action = None
         
         print("[GESTURE] Gesture control stopped")
 
