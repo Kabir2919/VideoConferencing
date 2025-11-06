@@ -270,6 +270,66 @@ class ServerConnection(QThread):
         except Exception as e:
             self.add_msg_signal.emit("System", f"Error sending file: {e}")
     
+    # def media_broadcast_loop(self, conn: socket.socket, media: str):
+    #     consecutive_errors = 0
+    #     max_errors = 5
+        
+    #     while self.connected:
+    #         try:
+    #             if media == VIDEO:
+    #                 data = client.get_video()
+                    
+    #                 # CRITICAL: Always send something, even if camera is off
+    #                 if data is None:
+    #                     # Fallback - should not happen with new logic
+    #                     data = CAMERA_OFF_MARKER
+                    
+    #                 # Build message
+    #                 msg = Message(self.name, POST, media, data)
+    #                 msg_bytes = pickle.dumps(msg)
+                    
+    #                 # Check size
+    #                 if len(msg_bytes) > MEDIA_SIZE[media]:
+    #                     print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
+    #                     time.sleep(0.033)
+    #                     continue
+                        
+    #             elif media == AUDIO:
+    #                 data = client.get_audio()
+    #                 if data is None:
+    #                     time.sleep(0.023)
+    #                     continue
+                        
+    #                 msg = Message(self.name, POST, media, data)
+    #                 msg_bytes = pickle.dumps(msg)
+                    
+    #                 if len(msg_bytes) > MEDIA_SIZE[media]:
+    #                     print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
+    #                     time.sleep(0.023)
+    #                     continue
+    #             else:
+    #                 print(f"[ERROR] Invalid media type: {media}")
+    #                 break
+                    
+    #             self.send_msg(conn, msg)
+    #             consecutive_errors = 0
+                
+    #             if media == VIDEO:
+    #                 time.sleep(0.033)  # ~30 FPS
+    #             else:  # AUDIO
+    #                 time.sleep(0.023)  # ~43 FPS
+                    
+    #         except Exception as e:
+    #             consecutive_errors += 1
+    #             print(f"[ERROR] Media broadcast error ({media}): {e}")
+                
+    #             if consecutive_errors >= max_errors:
+    #                 print(f"[ERROR] Too many consecutive errors in {media} broadcast, stopping")
+    #                 break
+                    
+    #             time.sleep(0.1)
+    # In client.py, replace the media_broadcast_loop method in ServerConnection class:
+
     def media_broadcast_loop(self, conn: socket.socket, media: str):
         consecutive_errors = 0
         max_errors = 5
@@ -284,7 +344,18 @@ class ServerConnection(QThread):
                         # Fallback - should not happen with new logic
                         data = CAMERA_OFF_MARKER
                     
-                    # Build message
+                    # IMPORTANT: Check if data is the CAMERA_OFF_MARKER
+                    # The marker is very small, so it will always fit
+                    if data == CAMERA_OFF_MARKER:
+                        msg = Message(self.name, POST, media, data)
+                        msg_bytes = pickle.dumps(msg)
+                        # Marker is tiny, no size check needed
+                        self.send_msg(conn, msg)
+                        consecutive_errors = 0
+                        time.sleep(0.033)  # ~30 FPS
+                        continue
+                    
+                    # Build message for regular video data
                     msg = Message(self.name, POST, media, data)
                     msg_bytes = pickle.dumps(msg)
                     
