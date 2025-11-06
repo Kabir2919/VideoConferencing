@@ -1,3 +1,5 @@
+# Add this line at the very top of qt_gui.py, right after the imports from constants
+
 import os
 import cv2
 import pyaudio
@@ -11,6 +13,9 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
     , QDialog, QMenu, QWidgetAction, QCheckBox, QFrame, QSizePolicy
 
 from constants import *
+
+# CRITICAL: Import the camera off marker constant
+CAMERA_OFF_MARKER = b'CAMERA_OFF_MARKER_V1'
 
 # Camera
 CAMERA_RES = '240p'
