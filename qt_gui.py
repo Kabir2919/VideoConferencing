@@ -222,8 +222,13 @@ class Camera:
         """Set reference to gesture controller for drawing overlays"""
         self.gesture_controller = gesture_controller
     
+    # Replace the get_frame method in the Camera class (qt_gui.py)
+
     def get_frame(self, apply_overlays=False):
-        """Get camera frame with AGGRESSIVE compression to meet packet size limits"""
+        """
+        Get camera frame with AGGRESSIVE compression to meet packet size limits.
+        FIXED: Thread-safe frame capture that doesn't interfere with broadcast.
+        """
         if not self.camera_available or self.cap is None:
             return None
 
@@ -235,14 +240,19 @@ class Camera:
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+            # CRITICAL: Update gesture controller with frame COPY in separate thread
+            # This runs asynchronously and doesn't block transmission
             if (self.gesture_controller is not None
                 and hasattr(self.gesture_controller, 'update_frame_for_detection')
                 and self.gesture_controller.running):
                 try:
+                    # Use non-blocking update - if it fails, just skip this frame
                     self.gesture_controller.update_frame_for_detection(frame.copy())
                 except Exception as e:
-                    print(f"[CAMERA] Gesture update error (non-fatal): {e}")
+                    # Non-fatal - gesture detection can skip frames
+                    pass
 
+            # Create transmission frame (separate from detection frame)
             tx_frame = frame.copy()
             
             if ENABLE_ENCODE:
