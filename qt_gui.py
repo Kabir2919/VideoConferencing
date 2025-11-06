@@ -11,6 +11,12 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
     , QDialog, QMenu, QWidgetAction, QCheckBox, QFrame, QSizePolicy
 
 from constants import *
+# Import camera off marker from client module
+try:
+    from client import CAMERA_OFF_MARKER
+except ImportError:
+    # Define locally if import fails
+    CAMERA_OFF_MARKER = b'CAMERA_OFF_MARKER_V1'
 
 # Camera
 CAMERA_RES = '240p'
