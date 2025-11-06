@@ -9,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class GestureController(QThread):
     """
     Gesture control using MediaPipe for face detection.
-    FIXED: Proper camera toggling with stable state management
+    FIXED: Proper signal handling and camera state control
     """
 
     status_update_signal = pyqtSignal(str)
@@ -23,7 +23,6 @@ class GestureController(QThread):
         self.initialized = False
         self.face_detection_enabled = True
         
-        # CRITICAL: This determines if we affect transmission or just local preview
         self.control_transmission = control_transmission
 
         self.mp_face_detection = None
@@ -33,17 +32,8 @@ class GestureController(QThread):
         self.last_face_detected = False
         self.face_absent_counter = 0
         self.face_present_counter = 0
-        
-        # FIXED: More reasonable thresholds
-        if control_transmission:
-            # Transmission mode: be more conservative
-            # ~4.5 seconds before turning off, ~1.5 seconds to turn on
-            self.face_absent_threshold = 30   # 30 * 0.15s = 4.5s
-            self.face_present_threshold = 10   # 10 * 0.15s = 1.5s
-        else:
-            # Preview mode: can be more responsive
-            self.face_absent_threshold = 20    # 3 seconds
-            self.face_present_threshold = 10   # 1.5 seconds
+        self.face_absent_threshold = 30
+        self.face_present_threshold = 10
 
         self.show_detection_boxes = True
         self.detection_results = None
@@ -51,49 +41,33 @@ class GestureController(QThread):
         self.last_detection_frame = None
         self.frame_lock = threading.Lock()
 
-        # For preview-only mode
         self.local_hide_camera = False
         
-        # For transmission control mode - track last action taken
-        self.last_camera_action = None  # Will store True (turned on) or False (turned off)
-        self.state_change_lock = threading.Lock()
+        # FIXED: Track what gesture control thinks camera state should be
+        self.gesture_camera_state = True
 
         self.status_update_signal.connect(self.update_status)
         self.initialization_complete_signal.connect(self.on_initialization_complete)
         
-        # ONLY connect signal if we're controlling transmission
         if self.control_transmission:
             self.set_camera_state_signal.connect(self._set_camera_state_slot)
 
     def _set_camera_state_slot(self, state):
-        """
-        Slot to handle camera state changes - ONLY USED IN TRANSMISSION MODE
-        """
-        if not self.control_transmission:
-            return  # Should never happen, but safety check
-            
+        """Slot to handle camera state changes - runs in main thread"""
         try:
-            with self.state_change_lock:
-                current_state = self.main_window.client.camera_enabled
-                if current_state != state:
-                    print(f"[GESTURE_TX] *** Changing camera from {current_state} to {state} ***")
-                    self.main_window.client.camera_enabled = state
-                    self.main_window.update_camera_ui_state()
-                    self.last_camera_action = state
-                    # Allow broadcast thread to stabilize
-                    time.sleep(0.1)
-                else:
-                    print(f"[GESTURE_TX] Camera already in state {state}, no change needed")
+            # FIXED: Force state change even if it appears to be the same
+            print(f"[GESTURE] Setting camera state to: {state} (current: {self.main_window.client.camera_enabled})")
+            self.main_window.client.camera_enabled = state
+            self.gesture_camera_state = state
+            self.main_window.update_camera_ui_state()
+            print(f"[GESTURE] Camera state updated successfully to: {state}")
         except Exception as e:
-            print(f"[GESTURE_TX] Error setting camera state: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[GESTURE] Error setting camera state: {e}")
 
     def run(self):
-        """Main thread loop with proper mode handling"""
+        """Main thread loop with async initialization"""
         self.running = True
-        mode_name = "Camera Control" if self.control_transmission else "Preview Only"
-        self.status_update_signal.emit(f"Gesture Control: Initializing ({mode_name})...")
+        self.status_update_signal.emit("Gesture Control: Initializing...")
 
         camera = self.main_window.client.camera
         if not camera:
@@ -101,7 +75,7 @@ class GestureController(QThread):
             return
 
         try:
-            self.status_update_signal.emit(f"Gesture Control: Loading MediaPipe models...")
+            self.status_update_signal.emit("Gesture Control: Loading MediaPipe models...")
             self.mp_face_detection = mp.solutions.face_detection
             self.mp_drawing = mp.solutions.drawing_utils
             
@@ -119,51 +93,41 @@ class GestureController(QThread):
             
             self.initialized = True
             self.initialization_complete_signal.emit(True)
-            self.status_update_signal.emit(f"Gesture Control: Started ({mode_name})")
+            mode = "with camera control" if self.control_transmission else "preview only"
+            self.status_update_signal.emit(f"Gesture Control: Started ({mode})")
             
         except Exception as e:
             self.initialized = False
             self.initialization_complete_signal.emit(False)
-            self.status_update_signal.emit(f"Gesture Control: Failed - {str(e)}")
+            self.status_update_signal.emit(f"Gesture Control: Initialization failed - {str(e)}")
             return
-
-        # Allow system to stabilize before starting detection
-        time.sleep(0.5)
 
         while self.running and self.initialized:
             try:
-                # Get frame for detection
                 with self.frame_lock:
                     if self.last_detection_frame is None:
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                         continue
                     frame = self.last_detection_frame.copy()
 
-                # Perform face detection
                 rgb_frame = frame
+
                 results = self.face_detection.process(rgb_frame)
                 self.detection_results = results
 
                 face_detected = results.detections is not None and len(results.detections) > 0
 
-                # Update counters
                 self.update_face_counters(face_detected)
                 
-                # Handle based on mode
                 if self.control_transmission:
-                    # Transmission control mode: affects camera_enabled
                     self.handle_camera_transmission(face_detected)
                 else:
-                    # Preview only mode: only affects local display
                     self.handle_local_hide(face_detected)
 
-                # Detection interval
-                time.sleep(0.15)
+                time.sleep(0.1)
 
             except Exception as e:
-                print(f"[GESTURE] Detection error: {e}")
-                import traceback
-                traceback.print_exc()
+                self.status_update_signal.emit(f"Gesture Control: Error - {str(e)}")
                 time.sleep(1)
 
         self.status_update_signal.emit("Gesture Control: Stopped")
@@ -176,28 +140,23 @@ class GestureController(QThread):
     def update_frame_for_detection(self, frame):
         """
         Update the frame buffer for gesture detection.
-        This is called from Camera.get_frame() in a separate thread.
+        Called by Camera.get_frame() to provide frames for detection.
         """
-        if not self.running or not self.initialized:
-            return
-            
         try:
             with self.frame_lock:
                 self.last_detection_frame = frame.copy()
         except Exception as e:
-            # Non-fatal - just skip this frame
-            pass
+            print(f"[GestureControl] Warning: failed to update frame for detection: {e}")
 
     def draw_detection_boxes(self, frame):
         """
         Draw detection boxes on frame for LOCAL DISPLAY ONLY.
         This is NEVER transmitted to other clients.
         """
-        if not self.initialized or not self.running:
+        if not self.initialized:
             return frame
             
-        # In preview-only mode, hide local display if no face
-        if not self.control_transmission and self.local_hide_camera:
+        if self.local_hide_camera:
             blank = np.zeros_like(frame)
             text = "Face not detected - local preview hidden"
             try:
@@ -276,19 +235,10 @@ class GestureController(QThread):
         try:
             status_text = f"Faces: {len(self.detection_results.detections) if self.detection_results.detections else 0}"
             camera_status = "ON" if self.main_window.client.camera_enabled else "OFF"
-            mode_text = "TX_CTRL" if self.control_transmission else "PREVIEW"
-            
-            # Show counter status for debugging
-            if self.control_transmission:
-                if self.face_absent_counter > 0:
-                    status_text += f" | NoFace: {self.face_absent_counter}/{self.face_absent_threshold}"
-                elif self.face_present_counter > 0:
-                    status_text += f" | Face: {self.face_present_counter}/{self.face_present_threshold}"
-            
-            status_text += f" | Cam: {camera_status} | {mode_text}"
+            status_text += f" | Camera: {camera_status}"
 
             (text_width, text_height), baseline = cv2.getTextSize(
-                status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
             )
             cv2.rectangle(
                 frame_bgr,
@@ -302,9 +252,9 @@ class GestureController(QThread):
                 status_text,
                 (15, 15 + text_height),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.7,
                 (255, 255, 255),
-                1
+                2
             )
         except Exception as e:
             print(f"[GESTURE] Status text error: {e}")
@@ -319,77 +269,54 @@ class GestureController(QThread):
             return frame
 
     def update_face_counters(self, face_detected):
-        """
-        Update counters for face detection stability.
-        FIXED: Proper counter management with reset after action
-        """
+        """Update counters for face detection stability"""
         if face_detected:
             self.face_present_counter += 1
-            self.face_absent_counter = 0  # Reset absent counter
-            
-            # Cap the counter to prevent overflow
-            if self.face_present_counter > self.face_present_threshold + 5:
-                self.face_present_counter = self.face_present_threshold + 5
+            self.face_absent_counter = 0
         else:
             self.face_absent_counter += 1
-            self.face_present_counter = 0  # Reset present counter
-            
-            # Cap the counter to prevent overflow
-            if self.face_absent_counter > self.face_absent_threshold + 5:
-                self.face_absent_counter = self.face_absent_threshold + 5
+            self.face_present_counter = 0
 
     def handle_camera_transmission(self, face_detected):
         """
-        TRANSMISSION CONTROL MODE: Turn camera on/off for transmission.
-        FIXED: Proper state tracking to enable toggling
+        FIXED: Control actual camera transmission based on face presence.
+        This will turn the camera on/off for ALL clients.
         """
-        if not self.control_transmission:
-            return  # Safety check
-            
-        with self.state_change_lock:
-            current_camera_state = self.main_window.client.camera_enabled
-            
-            # Turn camera OFF when face is lost
-            if (not face_detected 
-                    and self.face_absent_counter >= self.face_absent_threshold
-                    and current_camera_state
-                    and self.last_camera_action != False):  # Only if we haven't already turned it off
-                
-                print(f"[GESTURE_TX] *** TURNING CAMERA OFF *** (absent={self.face_absent_counter}/{self.face_absent_threshold})")
-                self.set_camera_state_signal.emit(False)
-                self.status_update_signal.emit("Gesture [TX]: Face lost → Camera OFF")
+        # FIXED: Use our tracked state instead of querying main window
+        current_camera_state = self.gesture_camera_state
+        
+        # Turn camera OFF when face is lost
+        if (not face_detected
+                and self.face_absent_counter >= self.face_absent_threshold
+                and current_camera_state):
+            print(f"[GESTURE] Face lost for {self.face_absent_counter} frames, turning camera OFF")
+            self.set_camera_state_signal.emit(False)
+            self.status_update_signal.emit("Gesture: Face lost → Camera transmission OFF")
 
-            # Turn camera ON when face is detected
-            elif (face_detected 
-                    and self.face_present_counter >= self.face_present_threshold
-                    and not current_camera_state
-                    and self.last_camera_action != True):  # Only if we haven't already turned it on
-                
-                print(f"[GESTURE_TX] *** TURNING CAMERA ON *** (present={self.face_present_counter}/{self.face_present_threshold})")
-                self.set_camera_state_signal.emit(True)
-                self.status_update_signal.emit("Gesture [TX]: Face found → Camera ON")
+        # Turn camera ON when face is detected
+        if (face_detected
+                and self.face_present_counter >= self.face_present_threshold
+                and not current_camera_state):
+            print(f"[GESTURE] Face present for {self.face_present_counter} frames, turning camera ON")
+            self.set_camera_state_signal.emit(True)
+            self.status_update_signal.emit("Gesture: Face detected → Camera transmission ON")
 
     def handle_local_hide(self, face_detected):
         """
-        PREVIEW ONLY MODE: Only hide/show local preview.
-        Does NOT affect transmission - other clients always see your camera.
+        Only hide/show LOCAL preview based on face presence.
+        Never toggles camera transmission.
         """
-        if self.control_transmission:
-            return  # Safety check
-            
-        # Hide local preview when face is lost
         if (not face_detected
                 and self.face_absent_counter >= self.face_absent_threshold
                 and not self.local_hide_camera):
             self.local_hide_camera = True
-            self.status_update_signal.emit("Gesture [PREVIEW]: Face lost → local preview hidden")
+            self.status_update_signal.emit("Gesture: Face lost → local preview hidden")
 
-        # Show local preview when face is detected
         if (face_detected
                 and self.face_present_counter >= self.face_present_threshold
                 and self.local_hide_camera):
             self.local_hide_camera = False
-            self.status_update_signal.emit("Gesture [PREVIEW]: Face found → local preview shown")
+            self.status_update_signal.emit("Gesture: Face detected → local preview restored")
 
     def update_status(self, message):
         """Update status in chat widget"""
@@ -399,29 +326,19 @@ class GestureController(QThread):
             print(f"[GESTURE] Status update error: {e}")
 
     def stop_gesture_control(self):
-        """Stop the gesture control thread cleanly"""
-        print("[GESTURE] Stopping gesture control...")
+        """Stop the gesture control thread"""
         self.running = False
+        if self.isRunning():
+            self.wait(3000)
         
-        # Disconnect signal if in transmission mode
         try:
             if self.control_transmission:
                 self.set_camera_state_signal.disconnect()
         except:
             pass
-        
-        # Wait for thread to finish
-        if self.isRunning():
-            self.wait(3000)
-        
-        # Reset states
-        self.local_hide_camera = False
-        self.last_camera_action = None
-        
-        print("[GESTURE] Gesture control stopped")
 
     def toggle_detection_boxes(self, show=None):
-        """Toggle visibility of detection boxes"""
+        """Toggle visibility of detection boxes (LOCAL DISPLAY ONLY)"""
         if show is None:
             self.show_detection_boxes = not self.show_detection_boxes
         else:
@@ -444,7 +361,7 @@ class GestureController(QThread):
             self.status_update_signal.emit(f"Gesture: Failed to set sensitivity - {str(e)}")
 
     def set_thresholds(self, absent_threshold=30, present_threshold=10):
-        """Set custom thresholds"""
+        """Set custom thresholds for behavior"""
         self.face_absent_threshold = absent_threshold
         self.face_present_threshold = present_threshold
         self.status_update_signal.emit(
@@ -472,8 +389,7 @@ class AdvancedGestureController(GestureController):
     def run(self):
         """Enhanced run method with hand detection"""
         self.running = True
-        mode_name = "Camera Control" if self.control_transmission else "Preview Only"
-        self.status_update_signal.emit(f"Advanced Gesture: Initializing ({mode_name})...")
+        self.status_update_signal.emit("Advanced Gesture Control: Initializing...")
 
         camera = self.main_window.client.camera
         if not camera:
@@ -481,7 +397,7 @@ class AdvancedGestureController(GestureController):
             return
 
         try:
-            self.status_update_signal.emit("Advanced Gesture: Loading models...")
+            self.status_update_signal.emit("Advanced Gesture Control: Loading models...")
             
             import os
             if hasattr(os, 'nice'):
@@ -507,66 +423,58 @@ class AdvancedGestureController(GestureController):
             
             self.initialized = True
             self.initialization_complete_signal.emit(True)
-            self.status_update_signal.emit(f"Advanced Gesture: Started ({mode_name})")
+            mode = "with camera control" if self.control_transmission else "preview only"
+            self.status_update_signal.emit(f"Advanced Gesture Control: Started ({mode})")
             
         except Exception as e:
             self.initialized = False
             self.initialization_complete_signal.emit(False)
-            self.status_update_signal.emit(f"Advanced Gesture: Failed - {str(e)}")
+            self.status_update_signal.emit(f"Advanced Gesture Control: Initialization failed - {str(e)}")
             return
-
-        time.sleep(0.5)
 
         while self.running and self.initialized:
             try:
                 with self.frame_lock:
                     if self.last_detection_frame is None:
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                         continue
                     frame = self.last_detection_frame.copy()
 
                 rgb_frame = frame
 
-                # Face detection
                 face_results = self.face_detection.process(rgb_frame)
                 face_detected = face_results.detections is not None and len(face_results.detections) > 0
+
                 self.detection_results = face_results
 
                 self.update_face_counters(face_detected)
                 
-                # Handle camera based on mode
                 if self.control_transmission:
                     self.handle_camera_transmission(face_detected)
                 else:
                     self.handle_local_hide(face_detected)
 
-                # Hand detection
                 hand_results = self.hands.process(rgb_frame)
                 self.hand_results = hand_results
 
                 if hand_results.multi_hand_landmarks:
                     self.process_hand_gestures(hand_results.multi_hand_landmarks)
 
-                time.sleep(0.15)
+                time.sleep(0.1)
 
             except Exception as e:
-                print(f"[GESTURE] Error: {e}")
-                import traceback
-                traceback.print_exc()
+                self.status_update_signal.emit(f"Advanced Gesture Control: Error - {str(e)}")
                 time.sleep(1)
 
-        self.status_update_signal.emit("Advanced Gesture: Stopped")
+        self.status_update_signal.emit("Advanced Gesture Control: Stopped")
 
     def draw_detection_boxes(self, frame):
         """Enhanced drawing with hand landmarks"""
-        if not self.initialized or not self.running:
+        if not self.initialized:
             return frame
             
-        # First apply face detection boxes (includes hiding logic)
         frame = super().draw_detection_boxes(frame)
-        
-        # If local preview is hidden, don't draw hands either
-        if not self.control_transmission and self.local_hide_camera:
+        if self.local_hide_camera:
             return frame
 
         if not self.show_detection_boxes or self.hand_results is None:
@@ -639,7 +547,7 @@ class AdvancedGestureController(GestureController):
             return frame
 
     def process_hand_gestures(self, hand_landmarks_list):
-        """Process hand gestures with cooldown"""
+        """Process hand gestures with cooldown mechanism"""
         for hand_landmarks in hand_landmarks_list:
             gesture = self.detect_gesture(hand_landmarks)
 
@@ -659,7 +567,7 @@ class AdvancedGestureController(GestureController):
                     self.gesture_counter = 0
 
     def detect_gesture(self, hand_landmarks):
-        """Detect hand gesture"""
+        """Enhanced gesture detection with better finger extension logic"""
         try:
             landmarks = hand_landmarks.landmark
 
@@ -684,30 +592,53 @@ class AdvancedGestureController(GestureController):
             middle_extended = is_finger_extended(middle_tip, middle_mcp, wrist)
             ring_extended = is_finger_extended(ring_tip, ring_mcp, wrist)
             pinky_extended = is_finger_extended(pinky_tip, pinky_mcp, wrist)
+            
             thumb_extended = ((thumb_tip.x - thumb_mcp.x)**2 + (thumb_tip.y - thumb_mcp.y)**2)**0.5 > 0.1
             
-            fingers_extended = [thumb_extended, index_extended, middle_extended, ring_extended, pinky_extended]
+            fingers_extended = [
+                thumb_extended,
+                index_extended,
+                middle_extended,
+                ring_extended,
+                pinky_extended
+            ]
+            
             num_extended = sum(fingers_extended)
 
-            if index_extended and not middle_extended and not ring_extended and not pinky_extended and not thumb_extended:
+            if (index_extended and 
+                not middle_extended and 
+                not ring_extended and 
+                not pinky_extended and
+                not thumb_extended):
                 return "pointing_up"
-            if index_extended and middle_extended and not ring_extended and not pinky_extended:
+
+            if (index_extended and 
+                middle_extended and 
+                not ring_extended and 
+                not pinky_extended):
                 return "peace_sign"
+
             if num_extended >= 4:
                 return "open_palm"
-            if thumb_extended and not index_extended and not middle_extended and not ring_extended and not pinky_extended:
+
+            if (thumb_extended and
+                not index_extended and
+                not middle_extended and
+                not ring_extended and
+                not pinky_extended):
                 return "thumbs_up"
+            
             if num_extended == 0:
                 return "fist"
 
             return None
             
         except Exception as e:
-            print(f"[GESTURE] Detection error: {e}")
+            print(f"[GESTURE] Gesture detection error: {e}")
             return None
 
     def execute_gesture_command(self, gesture):
-        """Execute command based on gesture"""
+        """Execute command based on detected gesture"""
         try:
             if gesture == "thumbs_up":
                 current_mic_state = self.main_window.client.microphone_enabled
@@ -724,14 +655,17 @@ class AdvancedGestureController(GestureController):
             elif gesture == "open_palm":
                 try:
                     from constants import Message, POST, TEXT
+                    
                     recipients = []
+                    
                     try:
                         video_list = self.main_window.video_list_widget
                         for client_name in video_list.all_items.keys():
                             if client_name != self.main_window.client.name:
                                 recipients.append(client_name)
-                    except:
-                        pass
+                        print(f"[GESTURE] Found {len(recipients)} recipients from video_list")
+                    except Exception as e:
+                        print(f"[GESTURE] Error getting clients from video list: {e}")
                     
                     if len(recipients) == 0:
                         try:
@@ -739,19 +673,37 @@ class AdvancedGestureController(GestureController):
                             for name in all_clients.keys():
                                 if name != self.main_window.client.name:
                                     recipients.append(name)
-                        except:
-                            pass
+                            print(f"[GESTURE] Found {len(recipients)} recipients from all_clients")
+                        except Exception as e:
+                            print(f"[GESTURE] Error getting all_clients: {e}")
                     
                     if len(recipients) > 0:
                         hello_msg = "Hello! [Wave]"
-                        msg = Message(self.main_window.client.name, POST, TEXT, data=hello_msg, to_names=tuple(recipients))
-                        self.main_window.server_conn.send_msg(self.main_window.server_conn.main_socket, msg)
-                        self.main_window.chat_widget.add_msg("You", ", ".join(recipients), hello_msg)
+                        msg = Message(
+                            self.main_window.client.name, 
+                            POST, 
+                            TEXT, 
+                            data=hello_msg, 
+                            to_names=tuple(recipients)
+                        )
+                        self.main_window.server_conn.send_msg(
+                            self.main_window.server_conn.main_socket, 
+                            msg
+                        )
+                        
+                        self.main_window.chat_widget.add_msg(
+                            "You", 
+                            ", ".join(recipients), 
+                            hello_msg
+                        )
                         self.status_update_signal.emit(f"Gesture: Open palm -> Sent Hello to {len(recipients)} client(s)")
                     else:
-                        self.status_update_signal.emit("Gesture: Open palm -> No other clients")
+                        self.status_update_signal.emit("Gesture: Open palm -> No other clients connected")
                 except Exception as e:
-                    print(f"[GESTURE] Hello error: {e}")
+                    print(f"[GESTURE] Error sending hello: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.status_update_signal.emit(f"Gesture: Error sending hello - {str(e)}")
                     
             elif gesture == "fist":
                 if self.main_window.client.camera_enabled or self.main_window.client.microphone_enabled:
@@ -759,7 +711,7 @@ class AdvancedGestureController(GestureController):
                         self.main_window.toggle_camera()
                     if self.main_window.client.microphone_enabled:
                         self.main_window.toggle_microphone()
-                    self.status_update_signal.emit("Gesture: Fist -> Privacy Mode")
+                    self.status_update_signal.emit("Gesture: Fist -> Privacy Mode (Muted all)")
                 else:
                     if not self.main_window.client.camera_enabled:
                         self.main_window.toggle_camera()
@@ -770,35 +722,49 @@ class AdvancedGestureController(GestureController):
             elif gesture == "pointing_up":
                 try:
                     from constants import Message, POST, TEXT
+                    
                     recipients = []
                     try:
                         video_list = self.main_window.video_list_widget
                         for client_name in video_list.all_items.keys():
                             if client_name != self.main_window.client.name:
                                 recipients.append(client_name)
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"[GESTURE] Error getting clients: {e}")
                     
                     if len(recipients) == 0:
                         try:
                             from client import all_clients
                             recipients = [name for name in all_clients.keys() if name != self.main_window.client.name]
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"[GESTURE] Error with fallback: {e}")
                     
                     if len(recipients) > 0:
                         attention_msg = "[Raised Hand - Requesting Attention]"
-                        msg = Message(self.main_window.client.name, POST, TEXT, data=attention_msg, to_names=tuple(recipients))
-                        self.main_window.server_conn.send_msg(self.main_window.server_conn.main_socket, msg)
+                        msg = Message(
+                            self.main_window.client.name,
+                            POST,
+                            TEXT,
+                            data=attention_msg,
+                            to_names=tuple(recipients)
+                        )
+                        self.main_window.server_conn.send_msg(
+                            self.main_window.server_conn.main_socket,
+                            msg
+                        )
                         self.main_window.chat_widget.add_msg("You", ", ".join(recipients), attention_msg)
                         self.status_update_signal.emit(f"Gesture: Pointing up -> Raised hand to {len(recipients)} client(s)")
                     else:
-                        self.status_update_signal.emit("Gesture: Pointing up -> No other clients")
+                        self.status_update_signal.emit("Gesture: Pointing up -> No other clients connected")
                 except Exception as e:
-                    print(f"[GESTURE] Raise hand error: {e}")
+                    print(f"[GESTURE] Error raising hand: {e}")
+                    import traceback
+                    traceback.print_exc()
                     
         except Exception as e:
-            print(f"[GESTURE] Command error: {e}")
+            print(f"[GESTURE] Command execution error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def integrate_gesture_control(main_window, control_transmission=False):

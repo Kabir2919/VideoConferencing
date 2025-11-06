@@ -1,5 +1,3 @@
-# Add this at the top of client.py, right after the other imports and before IP definition
-
 import errno, socket
 import time
 import sys
@@ -15,16 +13,13 @@ from datetime import datetime
 from constants import *
 
 IP = socket.gethostbyname(socket.gethostname())
-IP = "192.168.220.55"  # Uncomment and set manually if needed
+# IP = "192.168.220.55"  # Uncomment and set manually if needed
 VIDEO_ADDR = (IP, VIDEO_PORT)
 AUDIO_ADDR = (IP, AUDIO_PORT)
 
-# Special marker for camera off state - MUST be defined before Client class
+# Special marker for camera off state
 CAMERA_OFF_MARKER = b'CAMERA_OFF_MARKER_V1'
 
-# CRITICAL: Make sure this import is at the module level
-# This ensures the marker is available to all functions
-import errno
 
 class Client:
     def __init__(self, name: str, current_device = False):
@@ -44,38 +39,24 @@ class Client:
         self.camera_enabled = True
         self.microphone_enabled = True
 
-    # Replace the get_video method in the Client class (client.py)
-
     def get_video(self):
-        """
-        Get video frame for transmission or display.
-        FIXED: Thread-safe with proper state handling to prevent disconnections.
-        """
-        # Check camera enabled state - this is thread-safe read
+        """Get video frame for transmission or display"""
         if not self.camera_enabled:
             # Camera is disabled - send marker
             self.video_frame = CAMERA_OFF_MARKER
             return CAMERA_OFF_MARKER
 
         if self.camera is not None:
-            try:
-                # Get frame from camera hardware
-                frame = self.camera.get_frame(apply_overlays=False)
-                
-                # If camera returns None (hardware issue), send camera off marker
-                if frame is None:
-                    self.video_frame = CAMERA_OFF_MARKER
-                    return CAMERA_OFF_MARKER
-                
-                # Valid frame received
-                self.video_frame = frame
-                return frame
-                
-            except Exception as e:
-                # Error getting frame - return camera off marker to maintain connection
-                print(f"[CLIENT] Error in get_video: {e}")
+            frame = self.camera.get_frame(apply_overlays=False)
+            
+            # If camera returns None (hardware issue), send camera off marker
+            if frame is None:
                 self.video_frame = CAMERA_OFF_MARKER
                 return CAMERA_OFF_MARKER
+            
+            # Valid frame received
+            self.video_frame = frame
+            return frame
         else:
             # No camera available
             self.video_frame = CAMERA_OFF_MARKER
@@ -289,87 +270,38 @@ class ServerConnection(QThread):
         except Exception as e:
             self.add_msg_signal.emit("System", f"Error sending file: {e}")
     
-    # Replace the media_broadcast_loop method in ServerConnection class (client.py)
-
     def media_broadcast_loop(self, conn: socket.socket, media: str):
-        """
-        FIXED: Ultra-stable broadcast loop that never causes disconnections.
-        Key improvements:
-        1. Never stops sending packets (always sends CAMERA_OFF_MARKER if needed)
-        2. Thread-safe state reading
-        3. Graceful error handling
-        4. No blocking operations
-        """
         consecutive_errors = 0
-        max_errors = 10  # Increased tolerance
-        last_camera_state = None
-        
-        # Wait for connection to stabilize
-        time.sleep(0.3)
-        
-        print(f"[{media}_BROADCAST] Starting broadcast loop")
+        max_errors = 5
         
         while self.connected:
             try:
                 if media == VIDEO:
-                    # Read camera state (thread-safe)
-                    current_camera_state = client.camera_enabled
+                    data = client.get_video()
                     
-                    # Log state changes for debugging
-                    if last_camera_state is not None and last_camera_state != current_camera_state:
-                        print(f"[VIDEO_BROADCAST] Camera state changed: {last_camera_state} -> {current_camera_state}")
-                        # Brief pause during state transition for stability
-                        time.sleep(0.05)
-                    
-                    last_camera_state = current_camera_state
-                    
-                    # CRITICAL: Always get data (either frame or marker)
-                    try:
-                        data = client.get_video()
-                    except Exception as e:
-                        print(f"[VIDEO_BROADCAST] Error getting video: {e}")
-                        data = CAMERA_OFF_MARKER
-                    
-                    # CRITICAL: Never send None - always send marker as fallback
+                    # CRITICAL: Always send something, even if camera is off
                     if data is None:
+                        # Fallback - should not happen with new logic
                         data = CAMERA_OFF_MARKER
                     
                     # Build message
                     msg = Message(self.name, POST, media, data)
-                    
-                    # Serialize message
-                    try:
-                        msg_bytes = pickle.dumps(msg)
-                    except Exception as e:
-                        print(f"[VIDEO_BROADCAST] Serialization error: {e}")
-                        consecutive_errors += 1
-                        time.sleep(0.033)
-                        continue
+                    msg_bytes = pickle.dumps(msg)
                     
                     # Check size
                     if len(msg_bytes) > MEDIA_SIZE[media]:
-                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - sending marker instead")
-                        # Send camera off marker instead of dropping packet
-                        msg = Message(self.name, POST, media, CAMERA_OFF_MARKER)
-                        msg_bytes = pickle.dumps(msg)
+                        print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
+                        time.sleep(0.033)
+                        continue
                         
                 elif media == AUDIO:
                     data = client.get_audio()
-                    
-                    # Audio can be None (mic off) - just skip this cycle
                     if data is None:
                         time.sleep(0.023)
                         continue
                         
                     msg = Message(self.name, POST, media, data)
-                    
-                    try:
-                        msg_bytes = pickle.dumps(msg)
-                    except Exception as e:
-                        print(f"[AUDIO_BROADCAST] Serialization error: {e}")
-                        consecutive_errors += 1
-                        time.sleep(0.023)
-                        continue
+                    msg_bytes = pickle.dumps(msg)
                     
                     if len(msg_bytes) > MEDIA_SIZE[media]:
                         print(f"[WARNING] {media} packet too large: {len(msg_bytes)} > {MEDIA_SIZE[media]} - SKIPPING")
@@ -378,43 +310,10 @@ class ServerConnection(QThread):
                 else:
                     print(f"[ERROR] Invalid media type: {media}")
                     break
-                
-                # Send the message
-                try:
-                    self.send_msg(conn, msg)
-                    consecutive_errors = 0  # Reset on success
-                except OSError as e:
-                    # Check if it's a benign socket error
-                    winerr = getattr(e, 'winerror', None)
-                    errnum = getattr(e, 'errno', None)
                     
-                    if winerr == 10038 or errnum in (errno.EBADF, errno.ENOTCONN):
-                        # Socket closed - this is normal during shutdown
-                        print(f"[{media}_BROADCAST] Socket closed gracefully")
-                        break
-                    else:
-                        # Real error - count it
-                        consecutive_errors += 1
-                        print(f"[WARNING] Send error in {media} broadcast ({consecutive_errors}/{max_errors}): {e}")
-                        
-                        if consecutive_errors >= max_errors:
-                            print(f"[ERROR] Too many errors in {media} broadcast")
-                            break
-                        
-                        time.sleep(0.1)
-                        continue
-                except Exception as e:
-                    consecutive_errors += 1
-                    print(f"[WARNING] Unexpected error in {media} broadcast ({consecutive_errors}/{max_errors}): {e}")
-                    
-                    if consecutive_errors >= max_errors:
-                        print(f"[ERROR] Too many consecutive errors in {media} broadcast")
-                        break
-                        
-                    time.sleep(0.1)
-                    continue
+                self.send_msg(conn, msg)
+                consecutive_errors = 0
                 
-                # Timing for frame rate
                 if media == VIDEO:
                     time.sleep(0.033)  # ~30 FPS
                 else:  # AUDIO
@@ -422,17 +321,13 @@ class ServerConnection(QThread):
                     
             except Exception as e:
                 consecutive_errors += 1
-                print(f"[ERROR] Critical error in {media} broadcast loop ({consecutive_errors}/{max_errors}): {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[ERROR] Media broadcast error ({media}): {e}")
                 
                 if consecutive_errors >= max_errors:
-                    print(f"[FATAL] Too many consecutive errors in {media} broadcast, stopping")
+                    print(f"[ERROR] Too many consecutive errors in {media} broadcast, stopping")
                     break
                     
-                time.sleep(0.2)
-        
-        print(f"[{media}_BROADCAST] Broadcast loop exited cleanly")
+                time.sleep(0.1)
 
     def handle_conn(self, conn: socket.socket, media: str):
         """Handle connection for TEXT (TCP) or VIDEO/AUDIO (UDP)"""

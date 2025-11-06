@@ -1,5 +1,3 @@
-# Add this line at the very top of qt_gui.py, right after the imports from constants
-
 import os
 import cv2
 import pyaudio
@@ -13,9 +11,6 @@ from PyQt6.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout, 
     , QDialog, QMenu, QWidgetAction, QCheckBox, QFrame, QSizePolicy
 
 from constants import *
-
-# CRITICAL: Import the camera off marker constant
-CAMERA_OFF_MARKER = b'CAMERA_OFF_MARKER_V1'
 
 # Camera
 CAMERA_RES = '240p'
@@ -227,13 +222,8 @@ class Camera:
         """Set reference to gesture controller for drawing overlays"""
         self.gesture_controller = gesture_controller
     
-    # Replace the get_frame method in the Camera class (qt_gui.py)
-
     def get_frame(self, apply_overlays=False):
-        """
-        Get camera frame with AGGRESSIVE compression to meet packet size limits.
-        FIXED: Thread-safe frame capture that doesn't interfere with broadcast.
-        """
+        """Get camera frame with AGGRESSIVE compression to meet packet size limits"""
         if not self.camera_available or self.cap is None:
             return None
 
@@ -245,19 +235,14 @@ class Camera:
             frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # CRITICAL: Update gesture controller with frame COPY in separate thread
-            # This runs asynchronously and doesn't block transmission
             if (self.gesture_controller is not None
                 and hasattr(self.gesture_controller, 'update_frame_for_detection')
                 and self.gesture_controller.running):
                 try:
-                    # Use non-blocking update - if it fails, just skip this frame
                     self.gesture_controller.update_frame_for_detection(frame.copy())
                 except Exception as e:
-                    # Non-fatal - gesture detection can skip frames
-                    pass
+                    print(f"[CAMERA] Gesture update error (non-fatal): {e}")
 
-            # Create transmission frame (separate from detection frame)
             tx_frame = frame.copy()
             
             if ENABLE_ENCODE:
